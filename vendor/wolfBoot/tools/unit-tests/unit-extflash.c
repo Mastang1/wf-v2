@@ -1,0 +1,599 @@
+/* unit-extflash.c
+ *
+ * Unit test for parser functions in libwolfboot.c
+ *
+ *
+ * Copyright (C) 2026 wolfSSL Inc.
+ *
+ * This file is part of wolfBoot.
+ *
+ * wolfBoot is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfBoot is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
+ */
+
+/* Option to enable sign tool debugging */
+/* Must also define DEBUG_WOLFSSL in user_settings.h */
+#define FLASH_SIZE (33 * 1024)
+#define WOLFBOOT_HASH_SHA256
+#define IMAGE_HEADER_SIZE 256
+#define EXT_FLASH
+
+#if defined(ENCRYPT_WITH_AES256) || defined(ENCRYPT_WITH_AES128)
+    #define WOLFSSL_AES_COUNTER
+    #define WOLFSSL_AES_DIRECT
+#endif
+#if defined(ENCRYPT_WITH_AES256)
+    #define WOLFSSL_AES_256
+#endif
+#if defined(ENCRYPT_WITH_CHACHA)
+    #define HAVE_CHACHA
+#endif
+
+#define ENCRYPT_KEY "123456789abcdef0123456789abcdef0123456789abcdef"
+#include <stdio.h>
+#include <check.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "user_settings.h"
+#include "image.h"
+
+#include "libwolfboot.c"
+
+#if defined(ENCRYPT_WITH_AES256) || defined(ENCRYPT_WITH_AES128)
+    #include "wolfcrypt/src/aes.c"
+#endif
+
+#if defined(ENCRYPT_WITH_CHACHA)
+    #include "wolfcrypt/src/chacha.c"
+#endif
+
+/* Mocks */
+
+static int locked = 0;
+
+void hal_init(void)
+{
+}
+int hal_flash_write(haladdr_t address, const uint8_t *data, int len)
+{
+    return 0;
+}
+int hal_flash_erase(haladdr_t address, int len)
+{
+    return 0;
+}
+void hal_flash_unlock(void)
+{
+    ck_assert_msg(locked, "Double unlock detected\n");
+    locked--;
+}
+void hal_flash_lock(void)
+{
+    ck_assert_msg(!locked, "Double lock detected\n");
+    locked++;
+}
+
+void hal_prepare_boot(void)
+{
+}
+
+/* Emulation of external flash with a static buffer of 32KB (update) + 1KB (swap) */
+uint8_t flash[FLASH_SIZE];
+
+/* Mocks for ext_flash_read, ext_flash_write, and ext_flash_erase functions */
+int ext_flash_read(uintptr_t address, uint8_t *data, int len) {
+    printf("Called ext_flash_read %p %p %d\n", (void *)address, (void *)data, len);
+
+    /* A negative length is never a valid request */
+    ck_assert_int_ge(len, 0);
+
+    /* Check that the read address and size are within the bounds of the flash memory */
+    ck_assert_int_le(address + len, FLASH_SIZE);
+
+    /* Copy the data from the flash memory to the output buffer */
+    memcpy(data, &flash[address], len);
+
+    return len;
+}
+
+int ext_flash_write(uintptr_t address, const uint8_t *data, int len) {
+    printf("Called ext_flash_write %p %p %d\n", (void *)address, (const void *)data, len);
+
+    /* A negative length is never a valid request */
+    ck_assert_int_ge(len, 0);
+
+
+    /* Check that the write address and size are within the bounds of the flash memory */
+    ck_assert_int_le(address + len, FLASH_SIZE);
+
+    /* Copy the data from the input buffer to the flash memory */
+    memcpy(&flash[address], data, len);
+
+    return 0;
+}
+
+int ext_flash_erase(uintptr_t address, int len) {
+    /* Check that the erase address and size are within the bounds of the flash memory */
+    ck_assert_int_le(address + len, FLASH_SIZE);
+
+    /* Check that address is aligned to WOLFBOOT_SECTOR_SIZE */
+    ck_assert_int_eq(address, address & ~(WOLFBOOT_SECTOR_SIZE - 1));
+
+    /* Check that len is aligned to WOLFBOOT_SECTOR_SIZE */
+    ck_assert_int_eq(len, len & ~(WOLFBOOT_SECTOR_SIZE - 1));
+
+
+    /* Erase the flash memory by setting each byte to 0xFF, WOLFBOOT_SECTOR_SIZE bytes at a time */
+    uint32_t i;
+    for (i = address; i < address + len; i += WOLFBOOT_SECTOR_SIZE) {
+        memset(&flash[i], 0xFF, WOLFBOOT_SECTOR_SIZE);
+    }
+
+    return 0;
+}
+/* Matches all keys:
+ *    - chacha (32 + 12)
+ *    - aes128 (16 + 16)
+ *    - aes256 (32 + 16)
+ */
+/* Longest key possible: AES256 (32 key + 16 IV = 48) */
+static const char enc_key[] = "0123456789abcdef0123456789abcdef"
+"0123456789abcdef";
+
+static uint8_t test_buffer[512] = {
+    'W',  'O',  'L',  'F',  0x00, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x04, 0x00, 0x0d, 0x0c, 0x0b, 0x0a,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x00, 0x08, 0x00,
+    0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x03, 0x00, 0x20, 0x00,
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, /*<-- end of options */
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        /* End HDR */
+    0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+};
+
+/* End Mocks */
+
+
+START_TEST(test_ext_flash_operations) {
+    uint32_t address = 0x1000;
+    uint32_t size = 512;
+    uint8_t data[2 * WOLFBOOT_SECTOR_SIZE];
+    uint8_t empty_sector[WOLFBOOT_SECTOR_SIZE];
+    int rres, wres, eres;
+
+    memset(empty_sector, 0xFF, WOLFBOOT_SECTOR_SIZE);
+
+    /* Write data to the flash memory */
+    wres = ext_flash_write(address, test_buffer, size);
+    ck_assert_int_eq(wres, 0);
+
+    /* Read data from the flash memory */
+    rres = ext_flash_read(address, data, size);
+    ck_assert_int_eq(rres, size);
+
+    /* Check that the data read from the flash memory matches the data that was written */
+    ck_assert_mem_eq(data, test_buffer, size);
+
+    /* Erase the first sector */
+    eres = ext_flash_erase(address, WOLFBOOT_SECTOR_SIZE);
+    ck_assert_int_eq(eres, 0);
+
+    /* Read first sector from the flash memory */
+    rres = ext_flash_read(address, data, WOLFBOOT_SECTOR_SIZE);
+    ck_assert_int_eq(rres, WOLFBOOT_SECTOR_SIZE);
+
+
+    /* Check that the first sector read is empty */
+    ck_assert_mem_eq(data, empty_sector, WOLFBOOT_SECTOR_SIZE);
+}
+END_TEST
+
+START_TEST(test_ext_enc_flash_operations) {
+    uint32_t address = 0x1000;
+    uint32_t size = 512;
+    uint8_t data[2 * WOLFBOOT_SECTOR_SIZE];
+    uint8_t dataw[2 * WOLFBOOT_SECTOR_SIZE];
+    int rres, wres, eres;
+
+
+    /* Write data to the flash memory */
+    memcpy(dataw, test_buffer, size);
+    wres = ext_flash_check_write(address, dataw, size);
+    ck_assert_int_eq(wres, 0);
+
+
+    /* Read data from the flash memory */
+    rres = ext_flash_check_read(address, data, size);
+    ck_assert_int_eq(rres, size);
+
+    /* Check that the data read from the flash memory matches the data that was written */
+    ck_assert_mem_eq(data, test_buffer, size);
+
+    address = 0x07FF0;
+    size = 16;
+
+    /* Write data to the flash memory */
+    memcpy(dataw, test_buffer, size);
+    wres = ext_flash_check_write(address, dataw, size);
+    ck_assert_int_eq(wres, 0);
+
+
+    /* Read data from the flash memory */
+    rres = ext_flash_check_read(address, data, size);
+    ck_assert_int_eq(rres, size);
+
+    /* Check that the data read from the flash memory matches the data that was written */
+    ck_assert_mem_eq(&flash[address], test_buffer, size);
+
+}
+END_TEST
+
+START_TEST(test_ext_enc_flash_short_unaligned_read) {
+    uint32_t address = 0x1000;
+    uint32_t size = 64;
+    uint8_t data[64];
+    uint8_t dataw[64];
+    /* Reads shorter than the remainder of the encryption block they start in:
+     * { offset within the block, number of bytes requested } */
+    static const int cases[][2] = { {1, 1}, {4, 4}, {8, 3}, {15, 1} };
+    unsigned int c;
+    int i, rres, wres;
+
+    memcpy(dataw, test_buffer, size);
+    wres = ext_flash_check_write(address, dataw, size);
+    ck_assert_int_eq(wres, 0);
+
+    for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        int off = cases[c][0];
+        int len = cases[c][1];
+
+        memset(data, 0xA5, sizeof(data));
+        rres = ext_flash_check_read(address + off, data, len);
+        ck_assert_int_eq(rres, len);
+        ck_assert_mem_eq(data, test_buffer + off, len);
+
+        /* No byte past the requested length may be written */
+        for (i = len; i < (int)sizeof(data); i++)
+            ck_assert_uint_eq(data[i], 0xA5);
+    }
+}
+END_TEST
+
+/* This test is also built without EXT_ENCRYPTED, where there is no block size */
+#ifdef ENCRYPT_BLOCK_SIZE
+    #define TEST_BLOCK_SIZE ENCRYPT_BLOCK_SIZE
+#else
+    #define TEST_BLOCK_SIZE 16
+#endif
+
+START_TEST(test_ext_enc_flash_short_unaligned_write) {
+    uint32_t address = 0x1000;
+    uint8_t data[TEST_BLOCK_SIZE];
+    uint8_t dataw[TEST_BLOCK_SIZE];
+    /* Writes shorter than the remainder of the encryption block they start in:
+     * { offset within the block, number of bytes provided } */
+    static const int cases[][2] = { {1, 1}, {0, 4}, {8, 3},
+        {TEST_BLOCK_SIZE - 1, 1} };
+    unsigned int c;
+    int i, rres, wres;
+
+    /* Prime the target block with known content */
+    memcpy(dataw, test_buffer, TEST_BLOCK_SIZE);
+    wres = ext_flash_check_write(address, dataw, TEST_BLOCK_SIZE);
+    ck_assert_int_eq(wres, 0);
+
+    for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        int off = cases[c][0];
+        int len = cases[c][1];
+        int tail = TEST_BLOCK_SIZE - (off + len);
+
+        /* Payload followed by a guard pattern that must never be consumed */
+        memset(dataw, 0x5A, sizeof(dataw));
+        for (i = 0; i < len; i++)
+            dataw[i] = (uint8_t)(0xC0 + i);
+
+        wres = ext_flash_check_write(address + off, dataw, len);
+        ck_assert_int_eq(wres, 0);
+
+        rres = ext_flash_check_read(address + off, data, len);
+        ck_assert_int_eq(rres, len);
+        ck_assert_mem_eq(data, dataw, len);
+
+        /* Bytes past the requested length must not have been taken from the
+         * caller's buffer */
+        if (tail > 0) {
+            rres = ext_flash_check_read(address + off + len, data, tail);
+            ck_assert_int_eq(rres, tail);
+            for (i = 0; i < tail; i++) {
+                if (data[i] != 0x5A)
+                    break;
+            }
+            ck_assert_int_lt(i, tail);
+        }
+    }
+}
+END_TEST
+
+
+/* A single request longer than the staging cache must not overrun it */
+START_TEST(test_ext_enc_flash_oversized_write) {
+    uint32_t address = 0x1000;
+    static uint8_t dataw[3 * WOLFBOOT_SECTOR_SIZE];
+    static uint8_t data[3 * WOLFBOOT_SECTOR_SIZE];
+    int i, rres, wres;
+
+    for (i = 0; i < (int)sizeof(dataw); i++)
+        dataw[i] = (uint8_t)(i ^ (i >> 8));
+
+    wres = ext_flash_check_write(address, dataw, sizeof(dataw));
+    ck_assert_int_eq(wres, 0);
+
+    memset(data, 0xA5, sizeof(data));
+    rres = ext_flash_check_read(address, data, sizeof(data));
+    ck_assert_int_eq(rres, (int)sizeof(data));
+    ck_assert_mem_eq(data, dataw, sizeof(dataw));
+}
+END_TEST
+
+/* A mid-block patch must not destroy the untouched bytes of a block that
+ * already holds encrypted content: the read-modify-write has to decrypt the
+ * stored block, splice the patch in, and re-encrypt. Re-encrypting the
+ * ciphertext as-is double-XORs the untouched bytes and stores plaintext,
+ * which then reads back as raw ciphertext. */
+START_TEST(test_ext_enc_flash_rmw_head_preserves_neighbors) {
+    uint32_t address = 0x1000;
+    uint8_t block_a[TEST_BLOCK_SIZE];
+    uint8_t block_p[TEST_BLOCK_SIZE];
+    uint8_t expect[TEST_BLOCK_SIZE];
+    uint8_t data[TEST_BLOCK_SIZE];
+    const int off = 4, len = 8;
+    int i, rres, wres;
+
+    for (i = 0; i < TEST_BLOCK_SIZE; i++) {
+        block_a[i] = (uint8_t)(0xA0 + i);
+        block_p[i] = (uint8_t)(0xB0 + i);
+    }
+
+    /* Prime the block with known content */
+    wres = ext_flash_check_write(address, block_a, TEST_BLOCK_SIZE);
+    ck_assert_int_eq(wres, 0);
+
+    /* Patch an unaligned mid-block subrange */
+    wres = ext_flash_check_write(address + off, block_p, len);
+    ck_assert_int_eq(wres, 0);
+
+    memcpy(expect, block_a, TEST_BLOCK_SIZE);
+    memcpy(expect + off, block_p, len);
+    rres = ext_flash_check_read(address, data, TEST_BLOCK_SIZE);
+    ck_assert_int_eq(rres, TEST_BLOCK_SIZE);
+    ck_assert_mem_eq(data, expect, TEST_BLOCK_SIZE);
+}
+END_TEST
+
+/* A write whose trailing partial block lands on a block that already holds
+ * encrypted content: the untouched tail of that block must survive. */
+START_TEST(test_ext_enc_flash_rmw_tail_preserves_neighbors) {
+    uint32_t address = 0x1000;
+    uint8_t block_b[TEST_BLOCK_SIZE];
+    uint8_t payload[2 * TEST_BLOCK_SIZE];
+    uint8_t expect[2 * TEST_BLOCK_SIZE];
+    uint8_t data[2 * TEST_BLOCK_SIZE];
+    const int tail = 8;
+    int i, rres, wres;
+
+    for (i = 0; i < TEST_BLOCK_SIZE; i++) {
+        block_b[i] = (uint8_t)(0xC0 + i);
+        payload[i] = (uint8_t)(0xD0 + i);
+        payload[TEST_BLOCK_SIZE + i] = (uint8_t)(0xE0 + i);
+    }
+
+    /* Two primed blocks */
+    wres = ext_flash_check_write(address, payload, TEST_BLOCK_SIZE);
+    ck_assert_int_eq(wres, 0);
+    wres = ext_flash_check_write(address + TEST_BLOCK_SIZE, block_b,
+        TEST_BLOCK_SIZE);
+    ck_assert_int_eq(wres, 0);
+
+    /* Aligned write of one full block plus a partial tail into block two */
+    wres = ext_flash_check_write(address, payload, TEST_BLOCK_SIZE + tail);
+    ck_assert_int_eq(wres, 0);
+
+    /* Block one is fully replaced; block two holds the spliced tail and the
+     * original bytes beyond it. */
+    memcpy(expect, payload, TEST_BLOCK_SIZE + tail);
+    memcpy(expect + TEST_BLOCK_SIZE + tail, block_b + tail,
+        TEST_BLOCK_SIZE - tail);
+    rres = ext_flash_check_read(address, data, 2 * TEST_BLOCK_SIZE);
+    ck_assert_int_eq(rres, 2 * TEST_BLOCK_SIZE);
+    ck_assert_mem_eq(data, expect, 2 * TEST_BLOCK_SIZE);
+}
+END_TEST
+
+/* A fallback-IV write whose head and tail partial blocks land on blocks
+ * that already hold encrypted content: the RMW re-syncs must re-apply the
+ * one-shot IV offset (wolfBoot_crypto_set_iv consumes it), or the partial
+ * blocks are re-anchored at the standard-IV position and only those blocks
+ * read back wrong under the forced fallback-IV read. */
+#ifdef EXT_ENCRYPTED
+START_TEST(test_ext_enc_flash_rmw_fallback_iv_preserves_neighbors) {
+    uint32_t address = 0x1000;
+    uint8_t block_a[TEST_BLOCK_SIZE];
+    uint8_t block_b[TEST_BLOCK_SIZE];
+    uint8_t payload[TEST_BLOCK_SIZE + 7];
+    uint8_t expect[2 * TEST_BLOCK_SIZE];
+    uint8_t data[2 * TEST_BLOCK_SIZE];
+    const int off = 4;
+    const int head_len = TEST_BLOCK_SIZE - off;
+    const int tail_len = 7 + off; /* len - head_len, block-size independent */
+    const int len = TEST_BLOCK_SIZE + 7;
+    int prevf, i, rres, wres;
+
+    for (i = 0; i < TEST_BLOCK_SIZE; i++) {
+        block_a[i] = (uint8_t)(0xF0 + i);
+        block_b[i] = (uint8_t)(0xF8 + i);
+    }
+    for (i = 0; i < (int)sizeof(payload); i++)
+        payload[i] = (uint8_t)(0x0F + i);
+
+    /* Prime both blocks under the fallback IV (aligned full-block writes;
+     * the offset is one-shot, so re-enable it before every write). */
+    wolfBoot_enable_fallback_iv(1);
+    wres = ext_flash_check_write(address, block_a, TEST_BLOCK_SIZE);
+    ck_assert_int_eq(wres, 0);
+    wolfBoot_enable_fallback_iv(1);
+    wres = ext_flash_check_write(address + TEST_BLOCK_SIZE, block_b,
+        TEST_BLOCK_SIZE);
+    ck_assert_int_eq(wres, 0);
+
+    /* One unaligned write: head RMW in block zero, tail RMW in block one */
+    wolfBoot_enable_fallback_iv(1);
+    wres = ext_flash_check_write(address + off, payload, len);
+    ck_assert_int_eq(wres, 0);
+
+    memcpy(expect, block_a, off);
+    memcpy(expect + off, payload, head_len);
+    memcpy(expect + TEST_BLOCK_SIZE, payload + head_len, tail_len);
+    memcpy(expect + TEST_BLOCK_SIZE + tail_len, block_b + tail_len,
+        TEST_BLOCK_SIZE - tail_len);
+
+    /* The update flow reads a fallback image with the fallback IV forced */
+    prevf = wolfBoot_force_fallback_iv(1);
+    rres = ext_flash_check_read(address, data, 2 * TEST_BLOCK_SIZE);
+    wolfBoot_force_fallback_iv(prevf);
+    ck_assert_int_eq(rres, 2 * TEST_BLOCK_SIZE);
+    ck_assert_mem_eq(data, expect, 2 * TEST_BLOCK_SIZE);
+}
+END_TEST
+#endif /* EXT_ENCRYPTED */
+
+/* A stream written in small, unaligned chunks must round-trip: every chunk
+ * boundary exercises the partial-block read-modify-write against content the
+ * previous chunks already encrypted. */
+START_TEST(test_ext_enc_flash_chunked_stream_roundtrip) {
+    uint32_t address = 0x1000;
+    const uint32_t total = 3 * TEST_BLOCK_SIZE + 7;
+    static uint8_t payload[3 * TEST_BLOCK_SIZE + 7];
+    static uint8_t data[3 * TEST_BLOCK_SIZE + 7];
+    uint32_t written = 0;
+    int i, rres, wres;
+
+    for (i = 0; i < (int)total; i++)
+        payload[i] = (uint8_t)(i * 7 + 3);
+
+    while (written < total) {
+        uint32_t chunk = total - written;
+        if (chunk > 13)
+            chunk = 13;
+        wres = ext_flash_check_write(address + written, payload + written,
+            chunk);
+        ck_assert_int_eq(wres, 0);
+        written += chunk;
+    }
+
+    memset(data, 0xA5, sizeof(data));
+    rres = ext_flash_check_read(address, data, total);
+    ck_assert_int_eq(rres, (int)total);
+    ck_assert_mem_eq(data, payload, total);
+}
+END_TEST
+
+
+Suite *wolfboot_suite(void)
+{
+
+    /* Suite initialization */
+    Suite *s = suite_create("wolfBoot");
+
+    /* Test cases */
+    TCase *ext_flash_operations  = tcase_create("External flash operations: API");
+    TCase *ext_enc_flash_operations  = tcase_create("External encrypted flash operations");
+    TCase *ext_enc_flash_short_read  = tcase_create("External encrypted flash short unaligned read");
+    TCase *ext_enc_flash_short_write = tcase_create("External encrypted flash short unaligned write");
+    TCase *ext_enc_flash_oversized_write = tcase_create("External encrypted flash oversized write");
+    TCase *ext_enc_flash_rmw = tcase_create("External encrypted flash RMW neighbour preservation");
+
+    /* Set parameters + add to suite */
+    tcase_add_test(ext_flash_operations, test_ext_flash_operations);
+    tcase_add_test(ext_enc_flash_operations, test_ext_enc_flash_operations);
+    tcase_add_test(ext_enc_flash_short_read,
+            test_ext_enc_flash_short_unaligned_read);
+    tcase_add_test(ext_enc_flash_short_write,
+            test_ext_enc_flash_short_unaligned_write);
+    tcase_add_test(ext_enc_flash_oversized_write,
+            test_ext_enc_flash_oversized_write);
+    tcase_add_test(ext_enc_flash_rmw,
+            test_ext_enc_flash_rmw_head_preserves_neighbors);
+    tcase_add_test(ext_enc_flash_rmw,
+            test_ext_enc_flash_rmw_tail_preserves_neighbors);
+#ifdef EXT_ENCRYPTED
+    tcase_add_test(ext_enc_flash_rmw,
+            test_ext_enc_flash_rmw_fallback_iv_preserves_neighbors);
+#endif
+    tcase_add_test(ext_enc_flash_rmw,
+            test_ext_enc_flash_chunked_stream_roundtrip);
+
+    tcase_set_timeout(ext_flash_operations, 20);
+    tcase_set_timeout(ext_enc_flash_operations, 20);
+    tcase_set_timeout(ext_enc_flash_short_read, 20);
+    tcase_set_timeout(ext_enc_flash_short_write, 20);
+    tcase_set_timeout(ext_enc_flash_oversized_write, 20);
+    tcase_set_timeout(ext_enc_flash_rmw, 20);
+    suite_add_tcase(s, ext_flash_operations);
+    suite_add_tcase(s, ext_enc_flash_operations);
+    suite_add_tcase(s, ext_enc_flash_short_read);
+    suite_add_tcase(s, ext_enc_flash_short_write);
+    suite_add_tcase(s, ext_enc_flash_oversized_write);
+    suite_add_tcase(s, ext_enc_flash_rmw);
+
+    return s;
+}
+
+
+int main(void)
+{
+    int fails;
+    Suite *s = wolfboot_suite();
+    SRunner *sr = srunner_create(s);
+    srunner_run_all(sr, CK_NORMAL);
+    fails = srunner_ntests_failed(sr);
+    srunner_free(sr);
+    return fails;
+}

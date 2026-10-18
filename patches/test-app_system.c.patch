@@ -1,0 +1,16 @@
+--- a/test-app/system.c
++++ b/test-app/system.c
+@@ -120,11 +120,11 @@
+     DMB();
+     reg32 = RCC_CFGR;
+     reg32 &= ~(0x1C00);
+-    RCC_CFGR = (reg32 | (RCC_PRESCALER_DIV_2 << 10));
++    RCC_CFGR = (reg32 | (RCC_PRESCALER_DIV_4 << 10));
+     DMB();
+     reg32 = RCC_CFGR;
+     reg32 &= ~(0x07 << 13);
+-    RCC_CFGR = (reg32 | (RCC_PRESCALER_DIV_4 << 13));
++    RCC_CFGR = (reg32 | (RCC_PRESCALER_DIV_2 << 13));
+     DMB();
+ 
+     /* Set PLL config */

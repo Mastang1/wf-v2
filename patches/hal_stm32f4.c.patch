@@ -1,0 +1,10 @@
+--- a/hal/stm32f4.c
++++ b/hal/stm32f4.c
+@@ -298,7 +298,7 @@
+     hpre = RCC_PRESCALER_DIV_NONE;
+     ppre1 = RCC_PRESCALER_DIV_4;
+     ppre2 = RCC_PRESCALER_DIV_2;
+-    flash_waitstates = 3;
++    flash_waitstates = 5; /* Tutorial: 168MHz at 2.7-3.6V; verify VDD. */
+ 
+     flash_set_waitstates(flash_waitstates);

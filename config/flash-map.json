@@ -1,0 +1,14 @@
+{
+  "assumption": "STM32F407ZGT6 1MiB 8MHz 3.3V; NOT hardware verified",
+  "flash_origin": "0x08000000",
+  "bootloader_reserved_bytes": 131072,
+  "boot": "0x08020000",
+  "app_vectors": "0x08020100",
+  "update": "0x08060000",
+  "swap": "0x080A0000",
+  "slot_bytes": 262144,
+  "erase_unit_bytes": 131072,
+  "header_bytes": 256,
+  "max_raw_app_bytes": 130816,
+  "factory_bytes": 786432
+}

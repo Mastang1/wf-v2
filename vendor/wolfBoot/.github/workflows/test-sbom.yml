@@ -1,0 +1,431 @@
+name: Wolfboot SBOM Canary
+
+# Exercises every wolfBoot SBOM route so a change to the build system, the
+# vendored wolfGlass tooling under tools/sbom/, or an IDE extractor cannot
+# silently break SBOM generation:
+#
+#   * Make  path  (methods 1-4)  -> make sbom TARGET=sim
+#   * CMake path  (method 5)     -> cmake --build --target sbom
+#   * IAR extractor (method 7)   -> tools/sbom/frontends/iar_sbom.py
+#   * compdb extractor (6, 8-11) -> tools/sbom/frontends/compdb_sbom.py
+#   * per-HAL SBOM               -> make sbom-hal TARGET=sim
+#   * Zephyr module SBOM         -> tools/sbom/frontends/zephyr_sbom.py
+#
+# Each route must emit a schema-valid CycloneDX 1.6 + SPDX 2.3 document whose
+# top-level component is wolfboot.
+#
+# The sbom_canary job also guards three properties of the SBOM itself:
+#
+#   * Toolchain neutrality - gcc and clang must give a byte-identical SBOM.
+#     The driver captures configuration with the host compiler and the source
+#     list, so the cross-toolchain that builds the firmware does not change the
+#     SBOM. No per-compiler front end is needed for clang, LLVM or a vendor
+#     compiler.
+#   * Reproducibility - the same configuration built from a different absolute
+#     path gives a byte-identical SBOM.
+#   * Path scrub - an absolute host path in a -D macro (the synthetic check and
+#     a real rp2350 build with PICO_SDK_PATH) must not reach the SBOM.
+#
+# The cross_targets job proves the same source route works for many embedded
+# targets with no IDE and no cross-toolchain installed. It runs make sbom for a
+# spread of architectures (Arm-M, Arm-A, PowerPC, Renesas RX and RISC-V). The
+# driver never calls the cross compiler, so the SBOM is produced for a target
+# whose toolchain is absent.
+#
+# The wolfglass_drift job holds tools/sbom/ to the revision it claims, so the
+# vendored copy cannot drift from wolfGlass unnoticed.
+
+on:
+  push:
+    branches: [ 'master', 'main', 'release/**' ]
+  pull_request:
+    branches: [ '*' ]
+
+jobs:
+  sbom_canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake python3 build-essential clang
+
+      - name: Verify vendored gen-sbom
+        run: test -f tools/sbom/gen-sbom
+
+      # Reproducibility guard: a -D macro carrying an absolute host path (e.g.
+      # arch.mk's -DPICO_SDK_PATH=$(PICO_SDK_PATH)) must never reach the SBOM.
+      - name: Path scrub check
+        run: |
+          printf 'src/image.c\n' > /tmp/scrub-srcs.txt
+          tools/sbom/sbom-driver \
+            --srcs-file /tmp/scrub-srcs.txt \
+            --cflags "-DWOLFBOOT_HASH_SHA256 -DPICO_SDK_PATH=/home/ci-secret/pico-sdk" \
+            --name wolfboot --version 0.0.0-scrubtest \
+            --cdx-out /tmp/scrub.cdx.json --spdx-out /tmp/scrub.spdx.json
+          if grep -q 'ci-secret' /tmp/scrub.cdx.json /tmp/scrub.spdx.json; then
+            echo "ERROR: absolute host path leaked into the SBOM (scrub failed)." >&2
+            exit 1
+          fi
+          grep -q 'PICO_SDK_PATH' /tmp/scrub.cdx.json || {
+            echo "ERROR: PICO_SDK_PATH macro was dropped entirely (should be redacted, not removed)." >&2
+            exit 1; }
+          echo "scrub OK: path redacted, macro key preserved"
+
+      - name: Make path - make sbom (sim)
+        run: |
+          cp config/examples/sim.config .config
+          make sbom TARGET=sim
+          python3 tools/sbom/validate_sbom.py \
+            --name-prefix wolfboot --min-properties 20 \
+            wolfboot-*.cdx.json wolfboot-*.spdx.json
+
+      - name: CMake path - cmake --target sbom (sim)
+        run: |
+          export SOURCE_DATE_EPOCH=1700000000
+          rm -rf build-sim
+          cmake -S . -B build-sim -G "Unix Makefiles" \
+            -DWOLFBOOT_TARGET=sim -DARCH=HOST -DSIGN=ED25519 -DHASH=SHA256 \
+            -DWOLFBOOT_SECTOR_SIZE=256 -DWOLFBOOT_PARTITION_SIZE=0x6400 \
+            -DWOLFBOOT_PARTITION_BOOT_ADDRESS=0x08003000 \
+            -DWOLFBOOT_PARTITION_UPDATE_ADDRESS=0x08009400 \
+            -DWOLFBOOT_PARTITION_SWAP_ADDRESS=0x0800F800 \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake --build build-sim --target sbom
+          python3 tools/sbom/validate_sbom.py \
+            --name-prefix wolfboot \
+            build-sim/wolfboot-*.cdx.json build-sim/wolfboot-*.spdx.json
+
+      - name: IAR extractor (method 7)
+        run: |
+          python3 tools/sbom/frontends/iar_sbom.py IDE/IAR/wolfboot.ewp \
+            --name wolfboot \
+            --driver tools/sbom/sbom-driver \
+            --version-file include/wolfboot/version.h \
+            --version-macro LIBWOLFBOOT_VERSION_STRING \
+            --cdx-out iar.cdx.json --spdx-out iar.spdx.json
+          python3 tools/sbom/validate_sbom.py \
+            --name-prefix wolfboot \
+            iar.cdx.json iar.spdx.json
+
+      - name: compdb extractor (methods 6, 8-11)
+        run: |
+          python3 tools/sbom/frontends/compdb_sbom.py \
+            build-sim/compile_commands.json \
+            --name wolfboot \
+            --driver tools/sbom/sbom-driver \
+            --version-file include/wolfboot/version.h \
+            --version-macro LIBWOLFBOOT_VERSION_STRING \
+            --cdx-out compdb.cdx.json --spdx-out compdb.spdx.json
+          python3 tools/sbom/validate_sbom.py \
+            --name-prefix wolfboot \
+            compdb.cdx.json compdb.spdx.json
+
+      - name: Per-HAL SBOM (make sbom-hal)
+        run: |
+          cp config/examples/sim.config .config
+          make sbom-hal TARGET=sim
+          python3 tools/sbom/validate_sbom.py \
+            --name-prefix wolfboot-hal- \
+            wolfboot-hal-sim-*.cdx.json wolfboot-hal-sim-*.spdx.json
+
+      - name: Zephyr module SBOM
+        run: |
+          python3 tools/sbom/frontends/zephyr_sbom.py \
+            --driver tools/sbom/sbom-driver \
+            --name wolfboot-zephyr \
+            --cmakelists zephyr/CMakeLists.txt \
+            --version-file include/wolfboot/version.h \
+            --version-macro LIBWOLFBOOT_VERSION_STRING \
+            --cdx-out zephyr.cdx.json --spdx-out zephyr.spdx.json
+          python3 tools/sbom/validate_sbom.py \
+            --name-prefix wolfboot-zephyr \
+            zephyr.cdx.json zephyr.spdx.json
+
+      - name: Make vs CMake equivalence (sim, advisory)
+        continue-on-error: true
+        run: |
+          export SOURCE_DATE_EPOCH=1700000000
+          cp config/examples/sim.config .config
+          rm -f wolfboot-*.cdx.json wolfboot-*.spdx.json
+          make sbom TARGET=sim
+          cp wolfboot-*.cdx.json /tmp/make.cdx.json
+          cp wolfboot-*.spdx.json /tmp/make.spdx.json
+          rm -rf build-sim-compare
+          cmake -S . -B build-sim-compare -G "Unix Makefiles" \
+            -DWOLFBOOT_TARGET=sim -DARCH=HOST -DSIGN=ED25519 -DHASH=SHA256 \
+            -DWOLFBOOT_SECTOR_SIZE=256 -DWOLFBOOT_PARTITION_SIZE=0x6400 \
+            -DWOLFBOOT_PARTITION_BOOT_ADDRESS=0x08003000 \
+            -DWOLFBOOT_PARTITION_UPDATE_ADDRESS=0x08009400 \
+            -DWOLFBOOT_PARTITION_SWAP_ADDRESS=0x0800F800 \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake --build build-sim-compare --target sbom
+          cp build-sim-compare/wolfboot-*.cdx.json /tmp/cmake.cdx.json
+          cp build-sim-compare/wolfboot-*.spdx.json /tmp/cmake.spdx.json
+          diff -u /tmp/make.cdx.json /tmp/cmake.cdx.json
+          diff -u /tmp/make.spdx.json /tmp/cmake.spdx.json
+
+      # Toolchain neutrality: the cross-toolchain that builds the firmware must
+      # not change the SBOM. Capture the same config with gcc and with clang and
+      # require a byte-identical result. SOURCE_DATE_EPOCH is fixed so the two
+      # runs are comparable.
+      - name: Toolchain neutrality (gcc vs clang)
+        run: |
+          export SOURCE_DATE_EPOCH=1700000000
+          cp config/examples/sim.config .config
+          rm -f wolfboot-*.cdx.json wolfboot-*.spdx.json
+          make sbom TARGET=sim HOSTCC=gcc
+          mv wolfboot-*.cdx.json /tmp/gcc.cdx.json
+          mv wolfboot-*.spdx.json /tmp/gcc.spdx.json
+          make sbom TARGET=sim HOSTCC=clang
+          mv wolfboot-*.cdx.json /tmp/clang.cdx.json
+          mv wolfboot-*.spdx.json /tmp/clang.spdx.json
+          if ! diff -u /tmp/gcc.cdx.json /tmp/clang.cdx.json \
+             || ! diff -u /tmp/gcc.spdx.json /tmp/clang.spdx.json; then
+            echo "ERROR: gcc and clang produced different SBOMs." >&2
+            echo "The SBOM must not depend on the toolchain." >&2
+            exit 1
+          fi
+          echo "neutrality OK: gcc and clang SBOMs are byte-identical"
+
+      # Reproducibility: the same configuration built from a different absolute
+      # path must give a byte-identical SBOM. This catches any absolute build
+      # path that leaks into the source list or the config record.
+      - name: Reproducibility (path independence)
+        run: |
+          export SOURCE_DATE_EPOCH=1700000000
+          cp config/examples/sim.config .config
+          rm -f wolfboot-*.cdx.json wolfboot-*.spdx.json
+          make sbom TARGET=sim
+          cp wolfboot-*.cdx.json /tmp/repro-a.cdx.json
+          rm -rf /tmp/wb-copy && mkdir -p /tmp/wb-copy
+          cp -a . /tmp/wb-copy/
+          git config --global --add safe.directory /tmp/wb-copy
+          ( cd /tmp/wb-copy \
+            && export SOURCE_DATE_EPOCH=1700000000 \
+            && rm -f wolfboot-*.cdx.json wolfboot-*.spdx.json \
+            && make sbom TARGET=sim )
+          cp /tmp/wb-copy/wolfboot-*.cdx.json /tmp/repro-b.cdx.json
+          if ! diff -u /tmp/repro-a.cdx.json /tmp/repro-b.cdx.json; then
+            echo "ERROR: SBOM is not reproducible across build paths." >&2
+            exit 1
+          fi
+          echo "reproducibility OK: identical SBOM from two paths"
+
+      # Path scrub in a real build: rp2350 injects -DPICO_SDK_PATH=<abs path>
+      # through arch.mk. The absolute path must be redacted while the macro key
+      # is kept. This exercises the scrub on a genuine build, not a synthetic
+      # command line.
+      - name: Path scrub in a real build (rp2350 / PICO_SDK_PATH)
+        run: |
+          cp config/examples/rp2350.config .config
+          rm -f wolfboot-*.cdx.json wolfboot-*.spdx.json
+          PICO_SDK_PATH=/home/ci-secret/pico-sdk \
+            make sbom TARGET=rp2350
+          if grep -q 'ci-secret' wolfboot-*.cdx.json wolfboot-*.spdx.json; then
+            echo "ERROR: absolute PICO_SDK_PATH leaked in a real rp2350 build." >&2
+            exit 1
+          fi
+          grep -q 'PICO_SDK_PATH' wolfboot-*.cdx.json || {
+            echo "ERROR: PICO_SDK_PATH macro was dropped (should be redacted)." >&2
+            exit 1; }
+          python3 tools/sbom/validate_sbom.py \
+            --name-prefix wolfboot --min-properties 20 \
+            wolfboot-*.cdx.json wolfboot-*.spdx.json
+          echo "rp2350 scrub OK: path redacted, macro key preserved"
+
+      - name: Upload SBOM artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolfboot-sboms
+          path: |
+            wolfboot-*.cdx.json
+            wolfboot-*.spdx.json
+            build-sim/wolfboot-*.cdx.json
+            build-sim/wolfboot-*.spdx.json
+            iar.cdx.json
+            iar.spdx.json
+            compdb.cdx.json
+            compdb.spdx.json
+            zephyr.cdx.json
+            zephyr.spdx.json
+          if-no-files-found: warn
+
+  # Proves the source route (make sbom) works for a spread of embedded targets
+  # with no IDE and no cross-toolchain installed. The driver never calls the
+  # cross compiler, so every target below produces a valid SBOM on a plain
+  # runner. This is the "any target, any toolchain, no hardware" guarantee.
+  cross_targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # A spread of architectures whose cross-toolchains are NOT installed:
+        #   stm32h7   Arm Cortex-M7      nrf52840  Arm Cortex-M4
+        #   imx-rt1060 Arm Cortex-M7     sama5d3   Arm Cortex-A5
+        #   nxp-t1040 PowerPC e5500      renesas-rx65n  Renesas RX
+        #   hifive1   RISC-V
+        #
+        # These are config file names, which are not always the TARGET the file
+        # selects: nrf52840.config sets TARGET=nrf52, imx-rt1060.config sets
+        # imx_rt, nxp-t1040.config sets nxp_t1040, renesas-rx65n.config sets
+        # rx65n. The config is the only source of truth, so the step below does
+        # not pass TARGET at all.
+        config:
+          - stm32h7
+          - nrf52840
+          - imx-rt1060
+          - sama5d3
+          - nxp-t1040
+          - renesas-rx65n
+          - hifive1
+        include:
+          # imx_rt compiles three MCUXpresso SDK drivers (fsl_clock, fsl_cache,
+          # fsl_flexspi) from outside the source tree. The SDK is not on a
+          # runner, so this target cannot produce a complete source set here.
+          - config: imx-rt1060
+            allow_missing: 1
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3
+
+      - name: Verify vendored gen-sbom
+        run: test -f tools/sbom/gen-sbom
+
+      # No TARGET= here on purpose. The config file sets it, and passing the
+      # config file name instead selects a HAL that does not exist: TARGET=
+      # nrf52840 asks for hal/nrf52840.c, which is really hal/nrf52.c, and the
+      # SBOM then described this bootloader with no target HAL at all (29
+      # sources, hal.c but no nrf52.c) while CI stayed green.
+      - name: make sbom (no cross-toolchain present)
+        env:
+          SBOM_ALLOW_MISSING: ${{ matrix.allow_missing }}
+        run: |
+          cp config/examples/${{ matrix.config }}.config .config
+          make sbom
+          python3 tools/sbom/validate_sbom.py \
+            --name-prefix wolfboot --min-properties 20 \
+            wolfboot-*.cdx.json wolfboot-*.spdx.json
+
+      - name: Upload SBOM artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolfboot-sbom-${{ matrix.config }}
+          path: |
+            wolfboot-*.cdx.json
+            wolfboot-*.spdx.json
+          if-no-files-found: warn
+
+  # tools/sbom/ is a vendored copy of the wolfGlass share/ set, pinned by
+  # tools/sbom/.wolfglass-rev.  Nothing else proves the copy still matches the
+  # pin, so a stale copy, a local patch, or an unresolvable revision would all
+  # pass unnoticed and wolfBoot would ship a different generator from the one
+  # wolfSSL controls.  wolfGlass owns the comparison: tools/wolfglass-sync
+  # --check diffs share/ against the vendored tree and compares HEAD against
+  # .wolfglass-rev.
+  wolfglass_drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the pinned wolfGlass revision
+        id: pin
+        run: |
+          rev="$(tr -d '[:space:]' < tools/sbom/.wolfglass-rev)"
+          if [ -z "$rev" ]; then
+            echo "ERROR: tools/sbom/.wolfglass-rev is empty." >&2
+            exit 1
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "Pinned wolfGlass revision: $rev"
+
+      # wolfGlass is public, so this needs no token and the check also runs on a
+      # fork PR. continue-on-error only defers an unresolvable pin to the step
+      # below, which can say what went wrong; it never skips the comparison.
+      - name: Check out wolfGlass at the pinned revision
+        id: fetch
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: wolfSSL/wolfGlass
+          ref: ${{ steps.pin.outputs.rev }}
+          path: .wolfglass-src
+
+      - name: Drift check against wolfGlass
+        env:
+          PINNED_REV: ${{ steps.pin.outputs.rev }}
+        run: |
+          if [ ! -d .wolfglass-src/share ]; then
+            echo "ERROR: wolfGlass revision $PINNED_REV does not resolve." >&2
+            echo "tools/sbom/.wolfglass-rev must name a commit that exists in" >&2
+            echo "wolfSSL/wolfGlass. Re-run tools/wolfglass-sync to re-pin." >&2
+            exit 1
+          fi
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/.wolfglass-src"
+          python3 .wolfglass-src/tools/wolfglass-sync \
+            --check --src .wolfglass-src --dest .
+
+  windows_sbom:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Native driver path scrub
+        shell: pwsh
+        run: |
+          Set-Content -Path scrub-srcs.txt -Value "src/image.c"
+          python tools/sbom/sbom-driver.py `
+            --srcs-file scrub-srcs.txt `
+            --cflags "-DWOLFBOOT_HASH_SHA256 -DSDK_PATH=C:\Users\ci-secret\sdk -DSDK_SHARE=\\server\share\sdk" `
+            --name wolfboot `
+            --version-file include/wolfboot/version.h `
+            --version-macro LIBWOLFBOOT_VERSION_STRING `
+            --cdx-out wolfboot-win.cdx.json `
+            --spdx-out wolfboot-win.spdx.json
+          if (Select-String -Path wolfboot-win.cdx.json,wolfboot-win.spdx.json -Pattern 'ci-secret|server\\share' -Quiet) {
+            throw "Windows absolute path leaked into the SBOM."
+          }
+          python tools/sbom/validate_sbom.py --name-prefix wolfboot wolfboot-win.cdx.json wolfboot-win.spdx.json
+
+      - name: Upload Windows SBOM artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolfboot-sbom-windows
+          path: |
+            wolfboot-win.cdx.json
+            wolfboot-win.spdx.json
+          if-no-files-found: warn

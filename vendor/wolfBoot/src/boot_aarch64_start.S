@@ -1,0 +1,2100 @@
+/**
+ * Aarch64 bootup
+ * Copyright (C) 2026 wolfSSL Inc.
+ *
+ * This file is part of wolfBoot.
+ *
+ * wolfBoot is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfBoot is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
+ */
+
+/* Code is adapted from the default AMD/Xilinx boot.S, translation_table.S and
+ * asm_vectors.S*/
+
+#ifdef TARGET_zynq
+#include "hal/zynq.h"
+#endif
+
+#ifdef TARGET_versal
+#include "hal/versal.h"
+#endif
+
+#ifdef TARGET_agilex5
+#include "hal/agilex5.h"
+#endif
+
+#ifdef TARGET_nxp_ls1028a
+#include "hal/nxp_ls1028a.h"
+#endif
+
+#ifdef TARGET_raspi3
+#include "hal/raspi3.h"
+#endif
+
+#ifdef TARGET_tegra234
+#include "hal/tegra234.h"
+#endif
+
+#ifdef TARGET_imx95_a55
+#include "hal/imx95_a55.h"
+#endif
+
+#ifdef TARGET_cm4
+#include "hal/cm4.h"
+#endif
+
+#ifdef TARGET_imx8qm
+#include "hal/imx8qm.h"
+#endif
+
+/* GICv2 Register Offsets */
+#ifndef GICD_BASE
+#define GICD_BASE       0xF9010000
+#endif
+#define GICD_CTLR       0x0000
+#define GICD_TYPER      0x0004
+#define GICD_SGIR       0x0F00
+#define GICD_IGROUPRn   0x0080
+
+#ifndef GICC_BASE
+#define GICC_BASE       0xF9020000
+#endif
+#define GICC_PMR        0x0004
+
+
+#ifndef USE_BUILTIN_STARTUP
+
+.globl MMUTableL0
+.globl MMUTableL1
+.globl MMUTableL2
+.global _prestart
+.global _boot
+
+.global __el3_stack
+.global __el2_stack
+.global __el1_stack
+.global __el0_stack
+.global _vector_table
+
+.globl FIQInterrupt
+.globl IRQInterrupt
+.globl SErrorInterrupt
+.globl SynchronousInterrupt
+.globl FPUStatus
+
+.set EL3_stack,   __el3_stack
+.set EL2_stack,   __el2_stack
+.set EL1_stack,   __el1_stack
+.set EL0_stack,   __el0_stack
+
+.set L0Table,     MMUTableL0
+.set L1Table,     MMUTableL1
+.set L2Table,     MMUTableL2
+.set vector_base, _vector_table
+
+#if defined(TARGET_versal)
+/* Versal: RVBAR is handled by PLM, not accessible from APU in JTAG mode */
+.set counterfreq, 100000000
+#elif defined(TARGET_agilex5)
+/* BL31 has already programmed CNTFRQ_EL0 before entering wolfBoot. */
+#else
+.set rvbar_base,  0xFD5C0040
+/* Cortex-A53 timestamp clock frequency */
+.set counterfreq, 99990005
+#endif
+
+.set MODE_EL1,    0x5
+.set DAIF_BIT,    0x1C0
+
+
+.section .boot,"ax"
+_boot:
+    mov    x0, #0
+    mov    x1, #0
+    mov    x2, #0
+    mov    x3, #0
+    mov    x4, #0
+    mov    x5, #0
+    mov    x6, #0
+    mov    x7, #0
+    mov    x8, #0
+    mov    x9, #0
+    mov    x10, #0
+    mov    x11, #0
+    mov    x12, #0
+    mov    x13, #0
+    mov    x14, #0
+    mov    x15, #0
+    mov    x16, #0
+    mov    x17, #0
+    mov    x18, #0
+    mov    x19, #0
+    mov    x20, #0
+    mov    x21, #0
+    mov    x22, #0
+    mov    x23, #0
+    mov    x24, #0
+    mov    x25, #0
+    mov    x26, #0
+    mov    x27, #0
+    mov    x28, #0
+    mov    x29, #0
+    mov    x30, #0
+
+    /* Init Exception Level */
+    mrs    x0, currentEL
+    cmp    x0, #0xC
+    beq    InitEL3
+
+    cmp    x0, #0x8
+    beq    InitEL2
+
+    cmp    x0, #0x4
+    beq    InitEL1
+
+    /* go to error if current exception level is not EL1-3 */
+    b      error
+
+InitEL3:
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    /* Set vector table base address */
+    ldr    x1, =vector_base
+    msr    VBAR_EL3,x1
+
+    /* Set reset vector address */
+    /* Note: On Versal, RVBAR is handled by PLM and APU_DUAL_CSR is not
+     * accessible in JTAG boot mode. Skip RVBAR write for Versal. */
+#if !defined(SKIP_RVBAR) || SKIP_RVBAR == 0
+    /* Get the cpu ID */
+    mrs    x0, MPIDR_EL1
+    and    x0, x0, #0xFF
+    mov    w0, w0
+    ldr    w2, =rvbar_base
+    /* calculate the RVBAR base address for particular CPU core */
+    mov    w3, #0x8
+    mul    w0, w0, w3
+    add    w2, w2, w0
+    /* store vector base address to RVBAR */
+    str    x1, [x2]
+#endif
+
+    /* Define stack pointer for current exception level */
+    ldr    x2,=EL3_stack
+    mov    sp,x2
+
+    /* Enable Trapping of SIMD/FPU register for standalone BSP */
+    mov    x0, #0
+#if defined(FPU_TRAP) && FPU_TRAP == 1
+    orr    x0, x0, #(0x1 << 10)
+#endif
+    msr    CPTR_EL3, x0
+    isb
+
+    /* Clear FPUStatus variable to make sure that it contains current
+     * status of FPU i.e. disabled. In case of a warm restart execution
+     * when bss sections are not cleared, it may contain previously updated
+     * value which does not hold true now.
+     */
+#if defined(FPU_TRAP) && FPU_TRAP == 1
+     ldr   x0,=FPUStatus
+     str   xzr, [x0]
+#endif
+    /* Configure SCR_EL3 */
+    mov    w1, #0              /* Initial value of register is unknown */
+    orr    w1, w1, #(1 << 11)  /* Set ST bit (Secure EL1 can access CNTPS_TVAL_EL1, CNTPS_CTL_EL1 & CNTPS_CVAL_EL1) */
+    orr    w1, w1, #(1 << 10)  /* Set RW bit (EL1 is AArch64, as this is the Secure world) */
+    orr    w1, w1, #(1 << 3)   /* Set EA bit (SError routed to EL3) */
+    orr    w1, w1, #(1 << 2)   /* Set FIQ bit (FIQs routed to EL3) */
+    orr    w1, w1, #(1 << 1)   /* Set IRQ bit (IRQs routed to EL3) */
+    msr    SCR_EL3, x1
+
+    /* Configure CPUACTLR_EL1 - CPU auxiliary control register
+     * Read-modify-write to preserve any pre-configured bits and add prefetch settings.
+     * Note: On Versal, BL31 will later apply additional errata workarounds after EL3 init:
+     *       859971, 1319367, CVE-2017-5715, CVE-2018-3639, CVE-2022-23960 */
+    mrs    x0, S3_1_C15_C2_0      /* Read current CPUACTLR_EL1 */
+    ldr    x1,=0x80CA000          /* L1 Data prefetch control - 5, Enable device split throttle, 2 independent data prefetch streams */
+    orr    x0, x0, x1              /* Merge with existing value */
+#if defined(CONFIG_ARM_ERRATA_855873) && CONFIG_ARM_ERRATA_855873
+    /* Set ENDCCASCI bit in CPUACTLR_EL1 register, to execute data
+     * cache clean operations as data cache clean and invalidate
+     */
+    orr    x0, x0, #(1 << 44)     /* Set ENDCCASCI bit */
+#endif
+    msr    S3_1_C15_C2_0, x0      /* CPUACTLR_EL1 */
+
+    /* Program the counter frequency.
+     * For the FSBL-replacement build, do NOT overwrite CNTFRQ_EL0: the BootROM
+     * sets it to the actual system-counter rate, which our usleep() needs for
+     * accurate psu_init DDR-training delays. Hardcoding 100MHz here is wrong
+     * when the counter runs at the BootROM (undivided) rate. */
+#if !defined(WOLFBOOT_ZYNQMP_FSBL) && !defined(TARGET_agilex5)
+#ifdef TARGET_nxp_ls1028a
+    /* Read the true base frequency from the system counter (CNTFID0 @ SYSCNT
+     * base+0x20 = SYS_REF_CLK/4); the counterfreq constant is the undivided
+     * clock and would make CNTPCT time run ~4x fast. */
+    ldr    x1, =0x023E0020
+    ldr    w0, [x1]
+#else
+    ldr    x0,=counterfreq
+#endif
+    msr    CNTFRQ_EL0, x0
+#endif
+
+    /* Enable hardware coherency between cores */
+    mrs    x0, S3_1_c15_c2_1      /* Read EL1 CPU Extended Control Register */
+    orr    x0, x0, #(1 << 6)      /* Set the SMPEN bit */
+    msr    S3_1_c15_c2_1, x0      /* Write EL1 CPU Extended Control Register */
+    isb
+
+    tlbi   ALLE3
+    ic     IALLU                  /* Invalidate ICache to PoU */
+    bl     invalidate_dcaches
+    dsb    sy
+    isb
+
+#ifndef NO_MMU
+    ldr    x1, =L0Table           /* Get address of level 0 for TTBR0_EL3 */
+    msr    TTBR0_EL3, x1          /* Set TTBR0_EL3 */
+
+    /**********************************************
+    * Set up memory attributes
+    * This equates to:
+    * 0 = b01000100 = Normal, Inner/Outer Non-Cacheable
+    * 1 = b11111111 = Normal, Inner/Outer WB/WA/RA
+    * 2 = b00000000 = Device-nGnRnE
+    * 3 = b00000100 = Device-nGnRE
+    * 4 = b10111011 = Normal, Inner/Outer WT/WA/RA
+    **********************************************/
+    ldr    x1, =0x000000BB0400FF44
+    msr    MAIR_EL3, x1
+
+    /**********************************************
+    * Set up TCR_EL3
+    * Granual Size TG0 = 00 -> 4KB
+    ***************************************************/
+#ifdef TARGET_versal
+    /* Versal: Physical Address Size PS = 100 -> 44bits 16TB
+     *         T0SZ = 20 -> (region size 2^(64-20) = 2^44) */
+    ldr    x1,=0x80843514
+#else
+    /* ZynqMP: Physical Address Size PS = 010 -> 40bits 1TB
+     *         T0SZ = 24 -> (region size 2^(64-24) = 2^40) */
+    ldr    x1,=0x80823518
+#endif
+
+    msr    TCR_EL3, x1
+    isb
+#endif /* !NO_MMU */
+
+    /* Enable SError Exception for asynchronous abort */
+    mrs    x1,DAIF
+    bic    x1,x1,#(0x1<<8)
+    msr    DAIF,x1
+
+    /* Configure SCTLR_EL3 */
+    mov    x1, #0                 /* Most of the SCTLR_EL3 bits are unknown at reset */
+#ifndef NO_MMU
+    orr    x1, x1, #(1 << 12)     /* Enable I cache */
+    orr    x1, x1, #(1 << 3)      /* Enable SP alignment check */
+    orr    x1, x1, #(1 << 2)      /* Enable caches */
+    orr    x1, x1, #(1 << 0)      /* Enable MMU */
+#else
+    orr    x1, x1, #(1 << 3)      /* Enable SP alignment check */
+#endif
+    msr    SCTLR_EL3, x1
+    dsb    sy
+    isb
+
+    bl     boot_entry_C           /* jump to start */
+#else
+    /* present exception level and selected exception level mismatch */
+    b      error
+#endif
+
+InitEL2:
+#if defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    /* Set vector table base address */
+    ldr    x1, =vector_base
+    msr    VBAR_EL2, x1
+
+    /* Define stack pointer for current exception level */
+    ldr    x2,=EL2_stack
+    mov    sp,x2
+
+    mov    x0, #0x33ff
+    msr    CPTR_EL2, x0   /* Enable FP/SIMD */
+
+    /* Invalidate TLB */
+    tlbi    alle2
+    /* Invalidate ICache */
+    ic     ialluis
+    isb    sy
+    /* Invalidate DCache */
+    bl     invalidate_dcaches
+    dsb    sy
+    isb
+
+#ifndef NO_MMU
+    ldr    x1, =L0Table           /* Get address of level 0 for TTBR0_EL2 */
+    msr    TTBR0_EL2, x1          /* Set TTBR0_EL2 */
+
+    /**********************************************
+    * Set up memory attributes
+    * This equates to:
+    * 0 = b01000100 = Normal, Inner/Outer Non-Cacheable
+    * 1 = b11111111 = Normal, Inner/Outer WB/WA/RA
+    * 2 = b00000000 = Device-nGnRnE
+    * 3 = b00000100 = Device-nGnRE
+    * 4 = b10111011 = Normal, Inner/Outer WT/WA/RA
+    **********************************************/
+    ldr    x1, =0x000000BB0400FF44
+    msr    MAIR_EL2, x1
+
+    /**********************************************
+    * Set up TCR_EL2
+    * Granual Size TG0 = 00 -> 4KB
+    ***************************************************/
+#ifdef TARGET_versal
+    /* Versal: Physical Address Size PS = 100 -> 44bits 16TB
+     *         T0SZ = 20 -> (region size 2^(64-20) = 2^44) */
+    ldr    x1,=0x80843514
+#else
+    /* ZynqMP: Physical Address Size PS = 010 -> 40bits 1TB
+     *         T0SZ = 24 -> (region size 2^(64-24) = 2^40) */
+    ldr    x1,=0x80823518
+#endif
+
+    msr    TCR_EL2, x1
+    isb
+
+    /* Configure SCTLR_EL2 */
+    mrs    x1, SCTLR_EL2
+    orr    x1, x1, #(1 << 12)     /* Enable ICache */
+    orr    x1, x1, #(1 << 3)      /* Enable SP alignment check */
+    orr    x1, x1, #(1 << 2)      /* Enable DCaches */
+    orr    x1, x1, #(1 << 0)      /* Enable MMU */
+#else
+    /* Configure SCTLR_EL2 - no MMU/cache */
+    mov    x1, #0
+    orr    x1, x1, #(1 << 3)      /* Enable SP alignment check */
+#endif
+    msr    SCTLR_EL2, x1
+    dsb    sy
+    isb
+
+    bl     boot_entry_C           /* jump to start */
+#else
+    /* present exception level and selected exception level mismatch */
+    b      error
+#endif
+
+InitEL1:
+#if defined(EL1_NONSECURE) && EL1_NONSECURE == 1
+    /* Set vector table base address */
+    ldr    x1, =vector_base
+    msr    VBAR_EL1,x1
+
+    /* Trap floating point access only in case of standalone BSP */
+#if defined(FPU_TRAP) && FPU_TRAP == 0
+    mrs    x0, CPACR_EL1
+    orr    x0, x0, #(0x3 << 20)
+    msr    CPACR_EL1, x0
+#else
+    mrs    x0, CPACR_EL1
+    bic    x0, x0, #(0x3 << 20)
+    msr    CPACR_EL1, x0
+#endif
+    isb
+
+    /* Clear FPUStatus variable to make sure that it contains current
+     * status of FPU i.e. disabled. In case of a warm restart execution
+     * when bss sections are not cleared, it may contain previously updated
+     * value which does not hold true now.
+     */
+#if defined(FPU_TRAP) && FPU_TRAP == 1
+     ldr   x0,=FPUStatus
+     str   xzr, [x0]
+#endif
+    /* Define stack pointer for current exception level */
+    ldr    x2,=EL1_stack
+    mov    sp,x2
+
+    /* Disable MMU first */
+    mov    x1,#0x0
+    msr    SCTLR_EL1, x1
+    isb
+
+    tlbi   VMALLE1
+    ic     IALLU                  /* Invalidate I cache to PoU */
+    bl     invalidate_dcaches
+    dsb    sy
+    isb
+
+#ifndef NO_MMU
+    ldr    x1, =L0Table           /* Get address of level 0 for TTBR0_EL1 */
+    msr    TTBR0_EL1, x1          /* Set TTBR0_EL1 */
+
+    /**********************************************
+    * Set up memory attributes
+    * This equates to:
+    * 0 = b01000100 = Normal, Inner/Outer Non-Cacheable
+    * 1 = b11111111 = Normal, Inner/Outer WB/WA/RA
+    * 2 = b00000000 = Device-nGnRnE
+    * 3 = b00000100 = Device-nGnRE
+    * 4 = b10111011 = Normal, Inner/Outer WT/WA/RA
+    **********************************************/
+    ldr    x1, =0x000000BB0400FF44
+    msr    MAIR_EL1, x1
+
+    /**********************************************
+    * Set up TCR_EL1
+    * Granual Size TG0 = 00 -> 4KB
+    ***************************************************/
+#ifdef TARGET_versal
+    /* Versal: Physical Address Size PS = 100 -> 44bits 16TB
+     *         T0SZ = 20 -> (region size 2^(64-20) = 2^44) */
+    ldr    x1,=0x485800514
+#else
+    /* ZynqMP: Physical Address Size PS = 010 -> 40bits 1TB
+     *         T0SZ = 24 -> (region size 2^(64-24) = 2^40) */
+    ldr    x1,=0x285800518
+#endif
+
+    msr    TCR_EL1, x1
+    isb
+#endif /* !NO_MMU */
+
+    /* Enable SError Exception for asynchronous abort */
+    mrs    x1,DAIF
+    bic    x1,x1,#(0x1<<8)
+    msr    DAIF,x1
+
+    /* Configure SCTLR_EL1 */
+    mov    x1,#0x0
+    orr    x1, x1, #(1 << 18)     /* Set WFE non trapping */
+    orr    x1, x1, #(1 << 17)     /* Set WFI non trapping */
+    orr    x1, x1, #(1 << 5)      /* Set CP15 barrier enabled */
+#ifndef NO_MMU
+    orr    x1, x1, #(1 << 12)     /* Set I bit (ICache) */
+    orr    x1, x1, #(1 << 2)      /* Set C bit (DCache) */
+    orr    x1, x1, #(1 << 0)      /* Set M bit (MMU) */
+#endif
+    msr    SCTLR_EL1, x1
+    isb
+
+    bl     boot_entry_C           /* jump to start */
+#else
+    /* present exception level and selected exception level mismatch */
+    b      error
+#endif
+
+/* Assembly startup error handler */
+error:
+    wfi
+    b      error
+
+
+
+
+
+
+
+/*
+* Below is the static translation page table required by MMU for Cortex-A53.
+* The translation table is flat mapped (input address = output address) with
+* default memory attributes defined for Zynq Ultrascale+ architecture.
+* It utilizes translation granual size of 4KB with 2MB section size for
+* initial 4GB memory and 1GB section size for memory after 4GB.
+* The overview of translation table memory attributes is described below.
+*
+*|                       | Memory Range                | Definition in Translation Table   |
+*|-----------------------|-----------------------------|-----------------------------------|
+*| DDR                   | 0x0000000000 - 0x007FFFFFFF | Normal write-back Cacheable       |
+*| PL                    | 0x0080000000 - 0x00BFFFFFFF | Strongly Ordered                  |
+*| QSPI, lower PCIe      | 0x00C0000000 - 0x00EFFFFFFF | Strongly Ordere                   |
+*| Reserved              | 0x00F0000000 - 0x00F7FFFFFF | Unassigned                        |
+*| STM Coresight         | 0x00F8000000 - 0x00F8FFFFFF | Strongly Ordered                  |
+*| GIC                   | 0x00F9000000 - 0x00F91FFFFF | Strongly Ordered                  |
+*| Reserved              | 0x00F9200000 - 0x00FCFFFFFF | Unassigned                        |
+*| FPS, LPS slaves       | 0x00FD000000 - 0x00FFBFFFFF | Strongly Ordered                  |
+*| CSU, PMU              | 0x00FFC00000 - 0x00FFDFFFFF | Strongly Ordered                  |
+*| TCM, OCM              | 0x00FFE00000 - 0x00FFFFFFFF | Normal inner write-back cacheable |
+*| Reserved              | 0x0100000000 - 0x03FFFFFFFF | Unassigned                        |
+*| PL, PCIe              | 0x0400000000 - 0x07FFFFFFFF | Strongly Ordered                  |
+*| DDR                   | 0x0800000000 - 0x0FFFFFFFFF | Normal inner write-back cacheable |
+*| PL, PCIe              | 0x1000000000 - 0xBFFFFFFFFF | Strongly Ordered                  |
+*| Reserved              | 0xC000000000 - 0xFFFFFFFFFF | Unassigned                        |
+*
+* For DDR region 0x0000000000 - 0x007FFFFFFF, a system where DDR is less than
+* 2GB, region after DDR and before PL is marked as undefined/reserved in
+* translation table. Region 0xF9100000 - 0xF91FFFFF is reserved memory in
+* 0x00F9000000 - 0x00F91FFFFF range, but it is marked as strongly ordered
+* because minimum section size in translation table section is 2MB. Region
+* 0x00FFC00000 - 0x00FFDFFFFF contains CSU and PMU memory which are marked as
+* Device since it is less than 1MB and falls in a region with device memory.
+*/
+
+.set reserved,  0x0                             /* Fault */
+#if defined(ZYNQMP_DDR_NC) && ZYNQMP_DDR_NC == 1
+.set Memory,    0x401 | (0 << 8) | (0x0)        /* DDR as Normal NON-cacheable (MAIR idx0=0x44) - diag */
+#elif defined(ZYNQMP_DDR_DEVICE) && ZYNQMP_DDR_DEVICE == 1
+.set Memory,    0x409 | (1 << 53) | (1 << 54)   /* DDR as Device-nGnRnE (no speculation) - diag */
+#elif defined(ZYNQMP_DDR_NONSHARED) && ZYNQMP_DDR_NONSHARED == 1
+.set Memory,    0x405 | (0 << 8) | (0x0)        /* normal writeback write allocate NON-shareable read write */
+#elif defined(EL1_NONSECURE) && EL1_NONSECURE == 1
+.set Memory,    0x405 | (2 << 8) | (0x0)        /* normal writeback write allocate outer shared read write */
+#else
+.set Memory,    0x405 | (3 << 8) | (0x0)        /* normal writeback write allocate inner shared read write */
+#endif
+.set Device,    0x409 | (1 << 53) | (1 << 54) | (0x0) /* strongly ordered read write non executable*/
+/* Outer-shareable Normal WB. A coherent DMA master behind the CCI (LS1028A
+ * ENETC) needs Outer-Shareable to snoop the A72 caches; Inner-Shareable only
+ * covers the CPU cluster. */
+.set MemoryOSH, 0x405 | (2 << 8) | (0x0)
+#ifndef TARGET_nxp_ls1028a
+.section .mmu_tbl0,"a"
+
+MMUTableL0:
+
+.set   SECT, MMUTableL1        /* 0x0000_0000 -  0x7F_FFFF_FFFF */
+.8byte SECT + 0x3
+.set   SECT, MMUTableL1+0x1000 /* 0x80_0000_0000 - 0xFF_FFFF_FFFF */
+.8byte SECT + 0x3
+
+#if defined(TARGET_versal) && defined(VERSAL_DDR_HIGH_BASE)
+/* Optional high DDR window (designs whose DDR aperture sits above 1 TB).
+ * One L0 descriptor per 512 GB, pointing at MMUTableL1_HI pages below.
+ * Base and size must be 512 GB aligned and end within the 44-bit space. */
+.if (VERSAL_DDR_HIGH_BASE % 0x8000000000) != 0
+.error "VERSAL_DDR_HIGH_BASE must be 512GB aligned"
+.endif
+.if VERSAL_DDR_HIGH_SIZE < 0x8000000000
+.error "VERSAL_DDR_HIGH_SIZE must be at least 512GB (one L0 granule)"
+.endif
+.if (VERSAL_DDR_HIGH_SIZE % 0x8000000000) != 0
+.error "VERSAL_DDR_HIGH_SIZE must be a multiple of 512GB"
+.endif
+.if (VERSAL_DDR_HIGH_BASE + VERSAL_DDR_HIGH_SIZE) > 0x100000000000
+.error "VERSAL_DDR_HIGH window exceeds the 44-bit address space"
+.endif
+.if VERSAL_DDR_HIGH_BASE < 0x10000000000
+.error "VERSAL_DDR_HIGH_BASE must be at least 1TB (the first two L0 entries are fixed)"
+.endif
+.rept ((VERSAL_DDR_HIGH_BASE / 0x8000000000) - 2)
+.8byte 0                       /* invalid up to the high window */
+.endr
+.set   SECT, MMUTableL1_HI
+.rept (VERSAL_DDR_HIGH_SIZE / 0x8000000000)
+.8byte SECT + 0x3
+.set   SECT, SECT + 0x1000
+.endr
+#endif /* TARGET_versal && VERSAL_DDR_HIGH_BASE */
+
+.section .mmu_tbl1,"a"
+
+MMUTableL1:
+
+.set  SECT, MMUTableL2         /* 0x0000_0000 - 0x3FFF_FFFF */
+.8byte SECT + 0x3              /* 1GB DDR */
+
+.rept  0x3                     /* 0x4000_0000 - 0xFFFF_FFFF */
+.set   SECT, SECT + 0x1000     /*1GB DDR, 1GB PL, 2GB other devices n memory */
+.8byte SECT + 0x3
+.endr
+
+.set   SECT,0x100000000
+.rept  0xC                     /* 0x0001_0000_0000 - 0x0003_FFFF_FFFF */
+.8byte SECT + reserved         /* 12GB Reserved */
+.set   SECT, SECT + 0x40000000
+.endr
+
+.rept   0x10                   /* 0x0004_0000_0000 - 0x0007_FFFF_FFFF */
+.8byte SECT + Device           /* 8GB PL, 8GB PCIe */
+.set   SECT, SECT + 0x40000000
+.endr
+
+
+#ifdef XPAR_PSU_DDR_1_S_AXI_BASEADDR
+.set DDR_1_START, XPAR_PSU_DDR_1_S_AXI_BASEADDR
+.set DDR_1_END, XPAR_PSU_DDR_1_S_AXI_HIGHADDR
+.set DDR_1_SIZE, (DDR_1_END - DDR_1_START)+1
+#if defined(DDR_1_SIZE) && DDR_1_SIZE > 0x800000000
+/* If DDR size is larger than 32GB, truncate to 32GB */
+.set DDR_1_REG, 0x20
+#else
+.set DDR_1_REG, DDR_1_SIZE/0x40000000
+#endif
+#else
+.set DDR_1_REG, 0
+#endif
+
+.set UNDEF_1_REG, 0x20 - DDR_1_REG
+
+.rept   DDR_1_REG              /* DDR based on size in hdf*/
+.8byte  SECT + Memory
+.set    SECT, SECT+0x40000000
+.endr
+
+.rept   UNDEF_1_REG           /* reserved for region where ddr is absent */
+.8byte  SECT + reserved
+.set    SECT, SECT+0x40000000
+.endr
+
+.rept   0x1C0                  /* 0x0010_0000_0000 - 0x007F_FFFF_FFFF */
+.8byte  SECT + Device          /* 448 GB PL */
+.set    SECT, SECT + 0x40000000
+.endr
+
+
+.rept   0x100                  /* 0x0080_0000_0000 - 0x00BF_FFFF_FFFF */
+.8byte  SECT + Device          /* 256GB PCIe */
+.set    SECT, SECT + 0x40000000
+.endr
+
+
+.rept   0x100                  /* 0x00C0_0000_0000 - 0x00FF_FFFF_FFFF */
+.8byte  SECT + reserved        /* 256GB reserved */
+.set    SECT, SECT + 0x40000000
+.endr
+
+
+#if defined(TARGET_versal) && defined(VERSAL_DDR_HIGH_BASE)
+/* 1 GB Normal-memory blocks covering the high DDR window. */
+.balign 4096
+MMUTableL1_HI:
+.set    SECT, VERSAL_DDR_HIGH_BASE
+.rept   (VERSAL_DDR_HIGH_SIZE / 0x40000000)
+.8byte  SECT + Memory
+.set    SECT, SECT + 0x40000000
+.endr
+#endif /* TARGET_versal && VERSAL_DDR_HIGH_BASE */
+
+.section .mmu_tbl2,"a"
+
+MMUTableL2:
+
+.set SECT, 0
+
+#ifdef TARGET_agilex5
+/* Agilex 5 HPS peripherals and bridges occupy the low 2GiB. Keep them
+ * strongly ordered; cached HPS DDR starts at 0x8000_0000 below. */
+.rept   0x0400                 /* 0x0000_0000 - 0x7FFF_FFFF */
+.8byte  SECT + Device
+.set    SECT, SECT+0x200000
+.endr
+#else
+#ifdef XPAR_PSU_DDR_0_S_AXI_BASEADDR
+.set DDR_0_START, XPAR_PSU_DDR_0_S_AXI_BASEADDR
+.set DDR_0_END, XPAR_PSU_DDR_0_S_AXI_HIGHADDR
+.set DDR_0_SIZE, (DDR_0_END - DDR_0_START)+1
+#if defined(DDR_0_SIZE) && DDR_0_SIZE > 0x80000000
+/* If DDR size is larger than 2GB, truncate to 2GB */
+.set DDR_0_REG, 0x400
+#else
+.set DDR_0_REG, DDR_0_SIZE/0x200000
+#endif
+#else
+.set DDR_0_REG, 0
+#endif
+
+.set UNDEF_0_REG, 0x400 - DDR_0_REG
+
+.rept   DDR_0_REG              /* DDR based on size in hdf*/
+.8byte  SECT + Memory
+.set    SECT, SECT+0x200000
+.endr
+
+.rept   UNDEF_0_REG            /* reserved for region where ddr is absent */
+.8byte  SECT + reserved
+.set    SECT, SECT+0x200000
+.endr
+#endif /* TARGET_agilex5 */
+
+#ifdef TARGET_agilex5
+/* Agilex 5 GSRD maps the 2GiB HPS DDR window at 0x8000_0000. */
+.rept   0x0400                 /* 0x8000_0000 - 0xFFFF_FFFF */
+.8byte  SECT + Memory
+.set    SECT, SECT+0x200000
+.endr
+#else
+.rept   0x0200                 /* 0x8000_0000 - 0xBFFF_FFFF */
+.8byte  SECT + Device          /* 1GB lower PL */
+.set    SECT, SECT+0x200000
+.endr
+
+.rept   0x0100                 /* 0xC000_0000 - 0xDFFF_FFFF */
+.8byte  SECT + Device          /* 512MB QSPI */
+.set    SECT, SECT+0x200000
+.endr
+
+.rept   0x080                  /* 0xE000_0000 - 0xEFFF_FFFF */
+.8byte  SECT + Device          /* 256MB lower PCIe */
+.set    SECT, SECT+0x200000
+.endr
+
+#ifdef TARGET_versal
+/* Versal: LPD/PMC peripherals at 0xF0000000 - 0xF7FFFFFF (includes QSPI @ 0xF1030000) */
+.rept   0x040                  /* 0xF000_0000 - 0xF7FF_FFFF */
+.8byte  SECT + Device          /* 128MB LPD peripherals (QSPI, I2C, etc) */
+.set    SECT, SECT+0x200000
+.endr
+#else
+/* ZynqMP: This region is reserved */
+.rept   0x040                  /* 0xF000_0000 - 0xF7FF_FFFF */
+.8byte  SECT + reserved        /* 128MB Reserved */
+.set    SECT, SECT+0x200000
+.endr
+#endif
+
+.rept   0x8                    /* 0xF800_0000 - 0xF8FF_FFFF */
+.8byte  SECT + Device          /* 16MB coresight */
+.set    SECT, SECT+0x200000
+.endr
+
+/* 1MB RPU LLP is marked for 2MB region as the minimum block size in
+translation table is 2MB and adjacent 63MB reserved region is
+converted to 62MB */
+
+.rept   0x1                    /* 0xF900_0000 - 0xF91F_FFFF */
+.8byte  SECT + Device          /* 2MB RPU low latency port */
+.set    SECT, SECT+0x200000
+.endr
+
+.rept   0x1F                   /* 0xF920_0000 - 0xFCFF_FFFF */
+.8byte  SECT + reserved        /* 62MB Reserved */
+.set    SECT, SECT+0x200000
+.endr
+
+.rept   0x8                    /* 0xFD00_0000 - 0xFDFF_FFFF */
+.8byte  SECT + Device          /* 16MB FPS */
+.set    SECT, SECT+0x200000
+.endr
+
+.rept   0xE                    /* 0xFE00_0000 -  0xFFBF_FFFF */
+.8byte  SECT + Device          /* 28MB LPS */
+.set    SECT, SECT+0x200000
+.endr
+
+/* 0xFFC0_0000 - 0xFFDF_FFFF */
+.8byte  SECT + Device          /*2MB PMU/CSU */
+
+.set    SECT, SECT+0x200000    /* 0xFFE0_0000 - 0xFFFF_FFFF*/
+.8byte  SECT + Memory          /* 2MB OCM/TCM */
+#endif /* TARGET_agilex5 */
+
+#else /* TARGET_nxp_ls1028a */
+/* ============================================================================
+ * LS1028A translation tables (4KB granule, 40-bit VA/PA, T0SZ=24).
+ * Memory map:
+ *   0x00000000-0x17FFFFFF  Device  (CCSR: DCFG 0x1E00000, RST 0x1E60000,
+ *                                   SP805 0xC000000, FlexSPI ctrl 0x20C0000, ...)
+ *   0x18000000-0x181FFFFF  Normal  (OCRAM: wolfBoot .data/.bss/stack)
+ *   0x18200000-0x1FFFFFFF  Device
+ *   0x20000000-0x3FFFFFFF  Normal  (FlexSPI NOR: wolfBoot XIP code, executable)
+ *   0x40000000-0x7FFFFFFF  Device
+ *   0x80000000-0xFFFFFFFF  Normal  (DDR, 2GB) Outer-Shareable Cacheable
+ *   0x100000000-0x7FFFFFFFF Device (incl. ENETC ECAM 0x1F0000000 + BAR
+ *                                   0x1F8000000 at the 7-8GB block)
+ * DDR is Normal Outer-Shareable Cacheable (MemoryOSH) for coherency with the
+ * ENETC coherent bus-master DMA (SICAR=0x27276767), which snoops from outside
+ * the CPU cluster. NOR/OCRAM are Normal for XIP execution and cacheable data.
+ * ========================================================================== */
+.section .mmu_tbl0,"a"
+MMUTableL0:
+.set   SECT, MMUTableL1
+.8byte SECT + 0x3              /* 0x00_0000_0000 - 0x7F_FFFF_FFFF -> L1 */
+.8byte 0x0                     /* 0x80_0000_0000 - 0xFF_FFFF_FFFF -> invalid */
+
+.section .mmu_tbl1,"a"
+MMUTableL1:
+.set   SECT, MMUTableL2
+.8byte SECT + 0x3             /* 0x0000_0000 - 0x3FFF_FFFF -> L2 (mixed) */
+.set   SECT, 0x40000000
+.8byte SECT + Device         /* 0x4000_0000 - 0x7FFF_FFFF  1GB Device */
+.set   SECT, 0x80000000
+.8byte SECT + MemoryOSH      /* 0x8000_0000 - 0xBFFF_FFFF  1GB DDR (OSH for DMA) */
+.set   SECT, 0xC0000000
+.8byte SECT + MemoryOSH      /* 0xC000_0000 - 0xFFFF_FFFF  1GB DDR (OSH for DMA) */
+.set   SECT, 0x100000000
+.rept  0x1FC                  /* 0x1_0000_0000 - 0x7F_FFFF_FFFF Device (508GB) */
+.8byte SECT + Device         /*  incl. ENETC ECAM/BAR at the 7-8GB block */
+.set   SECT, SECT + 0x40000000
+.endr
+
+.section .mmu_tbl2,"a"
+MMUTableL2:
+.set   SECT, 0x0
+.rept  0xC0                   /* 0x0000_0000 - 0x17FF_FFFF  Device (384MB CCSR) */
+.8byte SECT + Device
+.set   SECT, SECT + 0x200000
+.endr
+.8byte SECT + Memory         /* 0x1800_0000 - 0x181F_FFFF  OCRAM */
+.set   SECT, SECT + 0x200000
+.rept  0x3F                   /* 0x1820_0000 - 0x1FFF_FFFF  Device */
+.8byte SECT + Device
+.set   SECT, SECT + 0x200000
+.endr
+.rept  0x100                  /* 0x2000_0000 - 0x3FFF_FFFF  NOR (512MB, exec) */
+.8byte SECT + Memory
+.set   SECT, SECT + 0x200000
+.endr
+#endif /* TARGET_nxp_ls1028a */
+
+
+/*
+ * FPUContextSize is the size of the array where floating point registers are
+ * stored when required. The default size corresponds to the case when there is no
+ * nested interrupt. If there are nested interrupts in application which are using
+ * floating point operation, the size of FPUContextSize need to be increased as per
+ * requirement
+ */
+
+.set FPUContextSize, 528
+
+.macro saveregister
+    stp    X0,X1, [sp,#-0x10]!
+    stp    X2,X3, [sp,#-0x10]!
+    stp    X4,X5, [sp,#-0x10]!
+    stp    X6,X7, [sp,#-0x10]!
+    stp    X8,X9, [sp,#-0x10]!
+    stp    X10,X11, [sp,#-0x10]!
+    stp    X12,X13, [sp,#-0x10]!
+    stp    X14,X15, [sp,#-0x10]!
+    stp    X16,X17, [sp,#-0x10]!
+    stp    X18,X19, [sp,#-0x10]!
+    stp    X29,X30, [sp,#-0x10]!
+.endm
+
+.macro restoreregister
+    ldp    X29,X30, [sp], #0x10
+    ldp    X18,X19, [sp], #0x10
+    ldp    X16,X17, [sp], #0x10
+    ldp    X14,X15, [sp], #0x10
+    ldp    X12,X13, [sp], #0x10
+    ldp    X10,X11, [sp], #0x10
+    ldp    X8,X9, [sp], #0x10
+    ldp    X6,X7, [sp], #0x10
+    ldp    X4,X5, [sp], #0x10
+    ldp    X2,X3, [sp], #0x10
+    ldp    X0,X1, [sp], #0x10
+.endm
+
+.macro savefloatregister
+
+/* Load the floating point context array address from FPUContextBase */
+    ldr    x1,=FPUContextBase
+    ldr    x0, [x1]
+
+/* Save all the floating point register to the array */
+    stp    q0,q1, [x0], #0x20
+    stp    q2,q3, [x0], #0x20
+    stp    q4,q5, [x0], #0x20
+    stp    q6,q7, [x0], #0x20
+    stp    q8,q9, [x0], #0x20
+    stp    q10,q11, [x0], #0x20
+    stp    q12,q13, [x0], #0x20
+    stp    q14,q15, [x0], #0x20
+    stp    q16,q17, [x0], #0x20
+    stp    q18,q19, [x0], #0x20
+    stp    q20,q21, [x0], #0x20
+    stp    q22,q23, [x0], #0x20
+    stp    q24,q25, [x0], #0x20
+    stp    q26,q27, [x0], #0x20
+    stp    q28,q29, [x0], #0x20
+    stp    q30,q31, [x0], #0x20
+    mrs    x2, FPCR
+    mrs    x3, FPSR
+    stp    x2, x3, [x0], #0x10
+
+/* Save current address of floating point context array to FPUContextBase */
+    str    x0, [x1]
+.endm
+
+.macro restorefloatregister
+
+/* Restore the address of floating point context array from FPUContextBase */
+    ldr    x1,=FPUContextBase
+    ldr    x0, [x1]
+
+/* Restore all the floating point register from the array */
+    ldp    x2, x3, [x0,#-0x10]!
+    msr    FPCR, x2
+    msr    FPSR, x3
+    ldp    q30,q31, [x0,#-0x20]!
+    ldp    q28,q29, [x0,#-0x20]!
+    ldp    q26,q27, [x0,#-0x20]!
+    ldp    q24,q25, [x0,#-0x20]!
+    ldp    q22,q23, [x0,#-0x20]!
+    ldp    q20,q21, [x0,#-0x20]!
+    ldp    q18,q19, [x0,#-0x20]!
+    ldp    q16,q17, [x0,#-0x20]!
+    ldp    q14,q15, [x0,#-0x20]!
+    ldp    q12,q13, [x0,#-0x20]!
+    ldp    q10,q11, [x0,#-0x20]!
+    ldp    q8,q9, [x0,#-0x20]!
+    ldp    q6,q7, [x0,#-0x20]!
+    ldp    q4,q5, [x0,#-0x20]!
+    ldp    q2,q3, [x0,#-0x20]!
+    ldp    q0,q1, [x0,#-0x20]!
+
+/* Save current address of floating point context array to FPUContextBase */
+    str    x0, [x1]
+.endm
+
+.macro exception_return
+    eret
+#ifdef TARGET_versal
+    dsb    nsh
+    isb
+#endif
+.endm
+
+
+.section .vectors, "a"
+
+_vector_table:
+.set VBAR, _vector_table
+.org VBAR
+
+/*
+ * if application is built for XEN GUEST as EL1 Non-secure following image
+ * header is required by XEN.
+ */
+#if defined(HYP_GUEST) && HYP_GUEST == 1
+    /* Valid Image header */
+    /* HW reset vector  */
+    ldr    x16, =_boot
+    br     x16
+#ifdef TARGET_versal
+    dsb    nsh
+    isb
+#endif
+    /* text offset.  */
+    .dword 0
+    /* image size.  */
+    .dword 0
+    /* flags.  */
+    .dword 8
+    /* RES0  */
+    .dword 0
+    .dword 0
+    .dword 0
+
+    /* magic  */
+    .dword 0x644d5241
+    /* RES0  */
+    .dword 0
+    /* End of Image header.  */
+#endif
+    b      _boot
+
+.org (VBAR + 0x200)
+    b      SynchronousInterruptHandler
+
+.org (VBAR + 0x280)
+    b      IRQInterruptHandler
+
+.org (VBAR + 0x300)
+    b      FIQInterruptHandler
+
+.org (VBAR + 0x380)
+    b      SErrorInterruptHandler
+
+
+SynchronousInterruptHandler:
+    saveregister
+
+/* Check if the Synchronous abort is occurred due to floating point access. */
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    mrs    x0, ESR_EL3
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    mrs    x0, ESR_EL2
+#else
+    mrs    x0, ESR_EL1
+#endif
+    and    x0, x0, #(0x3F << 26)
+    mov    x1, #(0x7 << 26)
+    cmp    x0, x1
+/* If exception is not due to floating point access go to synchronous handler */
+    bne    synchronoushandler
+
+/*
+ * If excpetion occurred due to floating point access, Enable the floating point
+ * access i.e. do not trap floating point instruction
+ */
+ #if defined(EL3_SECURE) && EL3_SECURE == 1
+    mrs    x1,CPTR_EL3
+    bic    x1, x1, #(0x1<<10)
+    msr    CPTR_EL3, x1
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    mrs    x1,CPTR_EL2
+    orr    x1, x1, #(0x3 << 20)   /* Clear TFP bit to enable FP/SIMD */
+    msr    CPTR_EL2, x1
+#else
+    mrs    x1,CPACR_EL1
+    orr    x1, x1, #(0x1<<20)
+    msr    CPACR_EL1, x1
+#endif
+    isb
+
+/* If the floating point access was previously enabled, store FPU context
+ * registers(storefloat).
+ */
+    ldr    x0, =FPUStatus
+    ldrb   w1,[x0]
+    cbnz   w1, storefloat
+/*
+ * If the floating point access was not enabled previously, save the status of
+ * floating point accessibility i.e. enabled and store floating point context
+ * array address(FPUContext) to FPUContextBase.
+ */
+    mov    w1, #0x1
+    strb   w1, [x0]
+    ldr    x0, =FPUContext
+    ldr    x1, =FPUContextBase
+    str    x0,[x1]
+    b      restorecontext
+storefloat:
+    savefloatregister
+    b      restorecontext
+synchronoushandler:
+    bl      SynchronousInterrupt
+restorecontext:
+    restoreregister
+    exception_return
+
+IRQInterruptHandler:
+
+    saveregister
+/* Save the status of SPSR, ELR and CPTR to stack */
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    mrs    x0, CPTR_EL3
+    mrs    x1, ELR_EL3
+    mrs    x2, SPSR_EL3
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    mrs    x0, CPTR_EL2
+    mrs    x1, ELR_EL2
+    mrs    x2, SPSR_EL2
+#else
+    mrs    x0, CPACR_EL1
+    mrs    x1, ELR_EL1
+    mrs    x2, SPSR_EL1
+#endif
+    stp    x0, x1, [sp,#-0x10]!
+    str    x2, [sp,#-0x10]!
+
+/* Trap floating point access */
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    mrs    x1,CPTR_EL3
+    orr    x1, x1, #(0x1<<10)
+    msr    CPTR_EL3, x1
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    mrs    x1,CPTR_EL2
+    bic    x1, x1, #(0x3<<20)    /* Set TFP bits to trap FP/SIMD */
+    msr    CPTR_EL2, x1
+#else
+    mrs    x1,CPACR_EL1
+    bic    x1, x1, #(0x1<<20)
+    msr    CPACR_EL1, x1
+#endif
+    isb
+
+    bl     IRQInterrupt
+/*
+ * If floating point access is enabled during interrupt handling,
+ * restore floating point registers.
+ */
+
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    mrs    x0, CPTR_EL3
+    ands   x0, x0, #(0x1<<10)
+    bne    RestorePrevState
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    mrs    x0, CPTR_EL2
+    ands   x0, x0, #(0x3<<20)
+    bne    RestorePrevState
+#else
+    mrs    x0,CPACR_EL1
+    ands   x0, x0, #(0x1<<20)
+    beq    RestorePrevState
+#endif
+
+    restorefloatregister
+
+/* Restore the status of SPSR, ELR and CPTR from stack */
+RestorePrevState:
+    ldr    x2,[sp],0x10
+    ldp    x0, x1, [sp],0x10
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    msr    CPTR_EL3, x0
+    msr    ELR_EL3, x1
+    msr    SPSR_EL3, x2
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    msr    CPTR_EL2, x0
+    msr    ELR_EL2, x1
+    msr    SPSR_EL2, x2
+#else
+    msr    CPACR_EL1, x0
+    msr    ELR_EL1, x1
+    msr    SPSR_EL1, x2
+#endif
+    restoreregister
+    exception_return
+
+FIQInterruptHandler:
+
+    saveregister
+/* Save the status of SPSR, ELR and CPTR to stack */
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    mrs    x0, CPTR_EL3
+    mrs    x1, ELR_EL3
+    mrs    x2, SPSR_EL3
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    mrs    x0, CPTR_EL2
+    mrs    x1, ELR_EL2
+    mrs    x2, SPSR_EL2
+#else
+    mrs    x0, CPACR_EL1
+    mrs    x1, ELR_EL1
+    mrs    x2, SPSR_EL1
+#endif
+    stp    x0, x1, [sp,#-0x10]!
+    str    x2, [sp,#-0x10]!
+
+/* Trap floating point access */
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    mrs    x1,CPTR_EL3
+    orr    x1, x1, #(0x1<<10)
+    msr    CPTR_EL3, x1
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    mrs    x1,CPTR_EL2
+    bic    x1, x1, #(0x3<<20)
+    msr    CPTR_EL2, x1
+#else
+    mrs    x1,CPACR_EL1
+    bic    x1, x1, #(0x1<<20)
+    msr    CPACR_EL1, x1
+#endif
+    isb
+    bl     FIQInterrupt
+/*
+ * If floating point access is enabled during interrupt handling,
+ * restore floating point registers.
+ */
+
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    mrs    x0, CPTR_EL3
+    ands   x0, x0, #(0x1<<10)
+    bne    RestorePrevStatefiq
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    mrs    x0, CPTR_EL2
+    ands   x0, x0, #(0x3<<20)
+    bne    RestorePrevStatefiq
+#else
+    mrs    x0,CPACR_EL1
+    ands   x0, x0, #(0x1<<20)
+    beq    RestorePrevStatefiq
+#endif
+
+    restorefloatregister
+
+    /* Restore the status of SPSR, ELR and CPTR from stack */
+RestorePrevStatefiq:
+    ldr    x2,[sp],0x10
+    ldp    x0, x1, [sp],0x10
+#if defined(EL3_SECURE) && EL3_SECURE == 1
+    msr    CPTR_EL3, x0
+    msr    ELR_EL3, x1
+    msr    SPSR_EL3, x2
+#elif defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    msr    CPTR_EL2, x0
+    msr    ELR_EL2, x1
+    msr    SPSR_EL2, x2
+#else
+    msr    CPACR_EL1, x0
+    msr    ELR_EL1, x1
+    msr    SPSR_EL1, x2
+#endif
+    restoreregister
+    exception_return
+
+SErrorInterruptHandler:
+
+    saveregister
+    bl     SErrorInterrupt
+    restoreregister
+    exception_return
+
+
+.align 8
+/* Array to store floating point registers */
+FPUContext:
+    .skip FPUContextSize
+/* Stores address for floating point context array */
+FPUContextBase:
+    .skip 8
+FPUStatus:
+    .skip 1
+
+.align 8
+#elif defined(USE_SIMPLE_STARTUP)
+.section ".boot"
+
+.global _vector_table
+_vector_table:
+#if defined(TARGET_cm4)
+   /* ARM64 Linux kernel image header (Documentation/arm64/booting.rst). The RPi
+    * VideoCore firmware (start4.elf) only enters a 64-bit kernel that carries
+    * this header (branch at off 0, "ARM\x64" magic at off 56); it then runs the
+    * image in place at its 2MB-aligned load address (0x200000) rather than
+    * relocating to 0x80000. code0 branches to the real entry. */
+   b      _cm4_entry
+   .long  0                  /* code1 */
+   .quad  0                  /* text_offset */
+   .quad  _end - _vector_table  /* image_size */
+   .quad  0x2                /* flags: LE, 4KB pages, 2MB-aligned (NOT
+                              * position-independent: the image checks its
+                              * runtime vs link-time _vector_table and wfi-spins
+                              * on mismatch, so bit 3 "load anywhere" is wrong) */
+   .quad  0                  /* res2 */
+   .quad  0                  /* res3 */
+   .quad  0                  /* res4 */
+   .ascii "ARM\x64"          /* magic 0x644d5241 at offset 56 */
+   .long  0                  /* res5 */
+_cm4_entry:
+#endif
+   mov x21, x0        // read ATAG/FDT address
+
+#if defined(TARGET_cm4)
+   /* Load-address self-check: wolfBoot is linked absolutely at 0x200000 and is
+    * NOT position independent (the ldr =_vector_table below loads the absolute
+    * stack top). Compare the runtime address (PC-relative adr) with the linked
+    * address (from the literal pool); a mismatch means the firmware placed the
+    * image at a different 2MB base, so halt (silently, as this runs before any
+    * UART init) instead of executing from the wrong VMA. The generated
+    * config.txt pins kernel_address=0x200000. */
+   adr x2, _vector_table
+   ldr x3, =_vector_table
+   cmp x2, x3
+   b.eq 5f
+6: wfi
+   b   6b
+5:
+   /* Persist the firmware-provided DTB pointer (captured in x21 at entry) so the
+    * FIT boot path can hand the RPi firmware's fully-patched DTB (RAM size,
+    * mini-UART clock, serial no.) to Linux when the FIT is kernel-only. Only
+    * CPU0 stores it: a secondary core released with x0=0 (ARM64 boot protocol)
+    * would otherwise clobber CPU0's captured pointer. */
+   mrs x3, mpidr_el1
+   and x3, x3, #3
+   cbnz x3, 9f
+   ldr x2, =cm4_fw_dtb
+   str x21, [x2]
+9:
+#endif
+
+4: ldr x1, =_vector_table // get start of .text in x1
+    // Read current EL
+    mrs     x0, CurrentEL
+    and     x0, x0, #0x0C
+
+    // EL == 3?
+    cmp     x0, #12
+    bne     2f
+3:  mrs     x2, scr_el3
+    orr     x2, x2, 0x0F    // scr_el3 |= NS|IRQ|FIQ|EA
+    msr     scr_el3, x2
+
+    msr cptr_el3, xzr       // enable FP/SIMD
+
+    // EL == 1?
+2:  cmp     x0, #4
+    beq     1f
+
+    // EL == 2?
+    mov x2, #3 << 20
+    msr cptr_el2, x2           /* Enable FP/SIMD */
+#if defined(TARGET_cm4) || defined(TARGET_imx8qm)
+    /* Always install a valid EL2 vector base: the reset VBAR_EL2 is UNKNOWN, so
+     * without this a fault in the parsing-heavy boot code branches to an
+     * undefined address. The table halts cleanly (and, under DEBUG+DEBUG_UART,
+     * dumps ESR/ELR/FAR first). el2_to_el1_boot copies VBAR_EL2 into VBAR_EL1,
+     * so this also covers the window between the drop to EL1 and the payload
+     * installing its own vectors. */
+    ldr x2, =simple_el2_vectors
+    msr VBAR_EL2, x2
+    isb                        /* ensure new vector base is in effect */
+#endif
+    b 0f
+
+1:  mov x0, #3 << 20
+    msr cpacr_el1, x0           // Enable FP/SIMD for EL1
+    msr     sp_el1, x1
+
+   /* Suspend slave CPUs */
+0: mrs x3, mpidr_el1  // read MPIDR_EL1
+   and x3, x3, #3     // CPUID = MPIDR_EL1 & 0x03
+   cbz x3, 8f         // if 0, branch forward
+7: wfi                // infinite sleep
+   b    7b
+
+8:
+#if defined(TARGET_tegra234) || defined(TARGET_imx8qm) || defined(TARGET_imx95_a55)
+    /* Reserved in-DRAM stack from the linker script: the generic path sets sp
+     * to the image base, which here is the BL33 load address. */
+    ldr x1, =END_STACK
+#endif
+    mov sp, x1         // set stack pointer
+#if defined(TARGET_tegra234) || defined(TARGET_imx8qm) || defined(TARGET_imx95_a55)
+    /* Stash the handoff x0 (DTB pointer, saved in x21 at reset) in a .data
+     * global so C can read it after boot_entry_C clears BSS. */
+    adrp x2, boot_handoff_x0
+    add  x2, x2, :lo12:boot_handoff_x0
+    str  x21, [x2]
+#endif
+#if defined(TARGET_imx95_a55) && !defined(NO_MMU) && \
+    defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+    /* Identity-map DRAM Normal cacheable before C, or the FIT is hashed one
+     * uncached access at a time. Runs at EL2. Gated on EL2_HYPERVISOR because
+     * that compiles the teardown the ARM64 boot protocol needs, so turning the
+     * MMU on cannot drift apart from handing Linux a clean one. */
+    dsb     sy
+    isb
+    tlbi    alle2
+    dsb     sy
+    isb
+    ic      iallu                  /* the I-cache is about to be enabled */
+    dsb     sy
+    isb
+    /* Invalidate rather than clean: out of cold reset the cache RAMs hold random
+     * tags, the previous stage already cleaned what it owned, and a stale dirty
+     * line would later be written back over live DRAM. */
+    bl      imx95_dcache_invalidate_all
+    dsb     sy
+    isb
+
+    ldr     x1, =MMUTableL0
+    msr     TTBR0_EL2, x1
+    /* MAIR: 0 Normal NC, 1 Normal WB/WA/RA, 2 Device-nGnRnE, 3 Device-nGnRE,
+     * 4 Normal WT/WA/RA - the indices the block attributes above use. */
+    ldr     x1, =0x000000BB0400FF44
+    msr     MAIR_EL2, x1
+    /* 4KB granule, T0SZ=24 (40-bit VA), PS=010 (40-bit PA), inner-shareable
+     * WB walks. */
+    ldr     x1, =0x80823518
+    msr     TCR_EL2, x1
+    isb
+
+    mrs     x1, SCTLR_EL2
+    orr     x1, x1, #(1 << 12)     /* I-cache */
+    orr     x1, x1, #(1 << 2)      /* D-cache */
+    orr     x1, x1, #(1 << 0)      /* MMU */
+    msr     SCTLR_EL2, x1
+    dsb     sy
+    isb
+#endif
+    bl boot_entry_C   // boot_entry_C never returns
+    b   7b            // go to sleep anyhow in case.
+
+#if defined(TARGET_cm4) || defined(TARGET_imx8qm)
+/* Minimal always-on EL2 exception vectors. On any exception (data/instruction
+ * abort, etc.) halt cleanly rather than branch to the UNKNOWN reset VBAR_EL2.
+ * Under DEBUG+DEBUG_UART the handler additionally dumps ESR/ELR/FAR over UART.
+ *
+ * Each entry passes its slot number, which distinguishes a fault inside
+ * wolfBoot (slots 0-7) from one in the payload after the drop to EL1 (8-15). */
+.macro EL2_VEC label, idx
+    .align 7
+\label:
+    mov x3, #\idx
+    b   simple_el2_fault_common
+.endm
+
+.align 11
+.global simple_el2_vectors
+simple_el2_vectors:
+    EL2_VEC el2_v0,  0    /* Current EL, SP0:  Sync */
+    EL2_VEC el2_v1,  1    /*                   IRQ  */
+    EL2_VEC el2_v2,  2    /*                   FIQ  */
+    EL2_VEC el2_v3,  3    /*                   SError */
+    EL2_VEC el2_v4,  4    /* Current EL, SPx:  Sync */
+    EL2_VEC el2_v5,  5    /*                   IRQ  */
+    EL2_VEC el2_v6,  6    /*                   FIQ  */
+    EL2_VEC el2_v7,  7    /*                   SError */
+    EL2_VEC el2_v8,  8    /* Lower EL, AArch64: Sync */
+    EL2_VEC el2_v9,  9    /*                   IRQ  */
+    EL2_VEC el2_v10, 10   /*                   FIQ  */
+    EL2_VEC el2_v11, 11   /*                   SError */
+    EL2_VEC el2_v12, 12   /* Lower EL, AArch32: Sync */
+    EL2_VEC el2_v13, 13   /*                   IRQ  */
+    EL2_VEC el2_v14, 14   /*                   FIQ  */
+    EL2_VEC el2_v15, 15   /*                   SError */
+
+simple_el2_fault_common:
+#if defined(DEBUG) && defined(DEBUG_UART)
+    /* Switch to a dedicated fault stack before calling the C handler: the
+     * exception may have been taken with SP unset (the window before 'mov sp,x1'
+     * or on a secondary core that never sets SP) or with SP overflowed, and
+     * the handler needs a valid stack. x3 already carries the vector slot, so
+     * read the system registers into x0-x2 without disturbing it. */
+    ldr x4, =simple_el2_fault_stack_top
+    mov sp, x4
+    mrs x0, esr_el2
+    mrs x1, elr_el2
+    mrs x2, far_el2
+    bl  simple_el2_fault_handler /* void (esr, elr, far, vector) */
+#endif
+9:  wfi
+    b   9b
+
+#if defined(DEBUG) && defined(DEBUG_UART)
+.section ".bss"
+.balign 16
+simple_el2_fault_stack:
+    .skip 1024
+simple_el2_fault_stack_top:
+.section ".boot"
+#endif
+#endif /* TARGET_cm4 || TARGET_imx8qm */
+#if defined(TARGET_cm4)
+/* Firmware-provided DTB pointer, stored at _cm4_entry. Read by hal_get_boot_dts()
+ * (hal/cm4.c) for the kernel-only FIT boot path. In .data so it is not subject to
+ * BSS clearing; the runtime store at entry sets the value regardless of load. */
+.section ".data"
+.balign 8
+.global cm4_fw_dtb
+cm4_fw_dtb:
+    .quad 0
+.section ".boot"
+#endif /* TARGET_cm4 */
+#if 0
+.section ".boot"
+.global _vector_table
+_vector_table:
+    bl boot_entry_C   // boot_entry_C never returns
+#endif
+
+#if defined(TARGET_imx95_a55) && !defined(NO_MMU) && \
+    defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+/* Invalidate all data cache levels by set/way, once before the D-cache is
+ * enabled: out of cold reset the cache RAMs hold random tags and dirty bits, and
+ * a stale dirty line would otherwise be written back over live DRAM. */
+.section ".boot"
+.globl imx95_dcache_invalidate_all
+imx95_dcache_invalidate_all:
+    dmb     ISH
+    mrs     x0, CLIDR_EL1
+    ubfx    w2, w0, #24, #3        /* LoC */
+    cmp     w2, #0
+    b.eq    9f
+    mov     w1, #0                 /* level */
+1:  add     w3, w1, w1, lsl #1
+    lsr     w3, w0, w3
+    ubfx    w3, w3, #0, #3         /* cache type at this level */
+    cmp     w3, #2
+    b.lt    4f
+    lsl     w4, w1, #1
+    msr     CSSELR_EL1, x4
+    isb
+    mrs     x4, CCSIDR_EL1
+    ubfx    w3, w4, #0, #3
+    add     w3, w3, #4             /* log2(line size) */
+    ubfx    w5, w4, #13, #15       /* max set */
+    ubfx    w4, w4, #3, #10        /* max way */
+    clz     w6, w4
+2:  mov     w8, w4
+3:  lsl     w7, w1, #1
+    lsl     w9, w5, w3
+    orr     w7, w7, w9
+    lsl     w9, w8, w6
+    orr     w7, w7, w9
+    dc      ISW, x7
+    subs    w8, w8, #1
+    b.ge    3b
+    subs    w5, w5, #1
+    b.ge    2b
+4:  add     w1, w1, #1
+    cmp     w2, w1
+    b.gt    1b
+9:  dsb     sy
+    isb
+    ret
+
+/* i.MX95 identity tables (4KB granule, 40-bit VA/PA, T0SZ=24). DRAM is Normal
+ * cacheable so wolfcrypt's NEON loads do not fault; MU2's SCMI buffer stays
+ * Device, as the M33 writes it outside this cluster's coherency. 0-0x7FFFFFFF
+ * Device; 0x80000000-0xBFFFFFFF DRAM via L2 so the carveout can differ;
+ * 0xC0000000-0x27FFFFFFF DRAM cacheable; above invalid. */
+/* Block descriptors: valid + AF, with the MAIR index in bits [4:2] and the
+ * shareability in [9:8]. Device blocks are also PXN/UXN. */
+.set imx95_Memory,   0x405 | (3 << 8)                     /* Normal WB, ISH  */
+.set imx95_MemoryNC, 0x401 | (3 << 8)                     /* Normal NC, ISH  */
+.set imx95_Device,   0x409 | (1 << 53) | (1 << 54)        /* Device-nGnRnE   */
+
+.section .mmu_tbl0,"a"
+MMUTableL0:
+.set   SECT, MMUTableL1
+.8byte SECT + 0x3              /* 0x00_0000_0000 - 0x7F_FFFF_FFFF -> L1 */
+.8byte 0x0                     /* 0x80_0000_0000 - 0xFF_FFFF_FFFF invalid */
+
+.section .mmu_tbl1,"a"
+MMUTableL1:
+.set    SECT, 0x0
+.8byte  SECT + imx95_Device          /* 0x00000000 - 0x3FFFFFFF */
+.set    SECT, SECT+0x40000000
+.8byte  SECT + imx95_Device          /* 0x40000000 - 0x7FFFFFFF  peripherals */
+.set    SECT, MMUTableL2
+.8byte  SECT + 0x3             /* 0x80000000 - 0xBFFFFFFF -> L2 */
+.set    SECT, 0xC0000000
+.8byte  SECT + imx95_Memory          /* 0xC0000000 - 0xFFFFFFFF  DRAM */
+.set    SECT, 0x100000000
+.rept   6                      /* 0x1_00000000 - 0x2_7FFFFFFF  DRAM bank 1 */
+.8byte  SECT + imx95_Memory
+.set    SECT, SECT+0x40000000
+.endr
+.rept   502                    /* remainder of the 512 GiB L1: unmapped */
+.8byte  0x0
+.endr
+
+.section .mmu_tbl2,"a"
+MMUTableL2:
+/* 0x80000000 + 16 MiB: the DTB's Cortex-M7 carveout, holding that core's console
+ * ring, wolfBoot's log ring and the payload Linux loads later - all read by
+ * software this cache cannot reach, so Normal Non-Cacheable. */
+.set    SECT, 0x80000000
+.rept   8                      /* 8 x 2 MiB = 16 MiB */
+.8byte  SECT + imx95_MemoryNC
+.set    SECT, SECT+0x200000
+.endr
+.rept   504                    /* rest of the 1 GiB block: normal DRAM */
+.8byte  SECT + imx95_Memory
+.set    SECT, SECT+0x200000
+.endr
+
+
+/* Back to the section the surrounding startup code lives in: the routines that
+ * follow carry no .section of their own and would otherwise be assembled into
+ * the table above. */
+.section ".boot"
+#endif /* TARGET_imx95_a55 && !NO_MMU */
+
+#endif /* !USE_BUILTIN_STARTUP */
+
+
+/*
+ * void flush_dcache_range(start, end)
+ *
+ * clean & invalidate data cache in the range
+ *
+ * x0: start address
+ * x1: end address
+ */
+.global flush_dcache_range
+flush_dcache_range:
+    mrs    x3, ctr_el0
+    lsr    x3, x3, #16
+    and    x3, x3, #0xf
+    mov    x2, #4
+    lsl    x2, x2, x3  /* cache line size */
+
+    /* x2 <- minimal cache line size in cache system */
+    sub    x3, x2, #1
+    bic    x0, x0, x3
+1:  dc     civac, x0 /* clean & invalidate data or unified cache */
+    add    x0, x0, x2
+    cmp    x0, x1
+    b.lo   1b
+    dsb    sy
+    ret
+
+
+/*
+ * void zynqmp_dcache_disable(void)
+ *
+ * Clean+invalidate the entire data cache to PoC by set/way, then disable the
+ * D-cache (SCTLR_EL3.C=0) and drop the core out of the coherency domain
+ * (CPUECTLR_EL1.SMPEN=0). Used to TEST whether the QSPI body-load failure is
+ * purely a coherency artifact: with no cache lines to allocate into and the
+ * core out of the snoop domain, the coherent QSPIDMA writes must land in DDR.
+ * Clobbers x0-x11. Modeled on the ARMv8 set/way routine used elsewhere here.
+ */
+.global zynqmp_dcache_disable
+zynqmp_dcache_disable:
+    mrs     x0, clidr_el1
+    and     x3, x0, #0x07000000
+    lsr     x3, x3, #23                 /* x3 = LoC * 2 */
+    cbz     x3, .Lzdd_done
+    mov     x10, #0
+.Lzdd_level:
+    add     x2, x10, x10, lsr #1
+    lsr     x1, x0, x2
+    and     x1, x1, #7
+    cmp     x1, #2
+    b.lt    .Lzdd_skip
+    msr     csselr_el1, x10
+    isb
+    mrs     x1, ccsidr_el1
+    and     x2, x1, #7
+    add     x2, x2, #4                  /* x2 = log2(line len) */
+    mov     x4, #0x3ff
+    and     x4, x4, x1, lsr #3          /* x4 = max way */
+    clz     w5, w4
+    mov     x7, #0x7fff
+    and     x7, x7, x1, lsr #13         /* x7 = max set */
+.Lzdd_set:
+    mov     x9, x4
+.Lzdd_way:
+    lsl     x6, x9, x5
+    orr     x11, x10, x6
+    lsl     x6, x7, x2
+    orr     x11, x11, x6
+    dc      cisw, x11
+    subs    x9, x9, #1
+    b.ge    .Lzdd_way
+    subs    x7, x7, #1
+    b.ge    .Lzdd_set
+.Lzdd_skip:
+    add     x10, x10, #2
+    cmp     x3, x10
+    b.gt    .Lzdd_level
+.Lzdd_done:
+    mov     x10, #0
+    msr     csselr_el1, x10
+    dsb     sy
+    isb
+    /* disable D-cache (SCTLR_EL3.C, bit 2) */
+    mrs     x1, sctlr_el3
+    bic     x1, x1, #(1 << 2)
+    msr     sctlr_el3, x1
+    isb
+    /* leave the SMP/coherency domain (CPUECTLR_EL1.SMPEN, bit 6) */
+    mrs     x1, S3_1_C15_C2_1
+    bic     x1, x1, #(1 << 6)
+    msr     S3_1_C15_C2_1, x1
+    dsb     sy
+    isb
+    ret
+
+
+/* Initialize GIC 400 (GICv2) */
+.global gicv2_init_secure
+gicv2_init_secure:
+    ldr    x0, =GICD_BASE
+    mov    w9, #0x3               /* EnableGrp0 | EnableGrp1 */
+    str    w9, [x0, GICD_CTLR]    /* Secure GICD_CTLR */
+    ldr    w9, [x0, GICD_TYPER]
+    and    w10, w9, #0x1f         /* ITLinesNumber */
+    cbz    w10, 1f                /* No SPIs */
+    add    x11, x0, GICD_IGROUPRn
+    mov    w9, #~0                /* Config SPIs as Grp1 */
+    str    w9, [x11], #0x4
+0:  str    w9, [x11], #0x4
+    sub    w10, w10, #0x1
+    cbnz   w10, 0b
+
+    ldr    x1, =GICC_BASE         /* GICC_CTLR */
+    mov    w0, #3                 /* EnableGrp0 | EnableGrp1 */
+    str    w0, [x1]
+
+    mov    w0, #1 << 7            /* Allow NS access to GICC_PMR */
+    str    w0, [x1, #4]           /* GICC_PMR */
+1:
+    ret
+
+#if defined(BOOT_EL1) && defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1
+/*
+ * Transition from EL2 to EL1 and jump to application
+ *
+ * Parameters:
+ *   x0: entry_point - Address to jump to in EL1
+ *   x1: dts_addr - Device tree address (passed in x0 to application)
+ *
+ * This function configures the necessary system registers for EL1 operation
+ * and performs an exception return (ERET) to drop from EL2 to EL1.
+ *
+ * Based on ARM Architecture Reference Manual and U-Boot implementation.
+ */
+.global el2_to_el1_boot
+el2_to_el1_boot:
+    /* Save parameters - x0=entry_point, x1=dts_addr */
+    mov    x19, x0                /* Save entry_point in x19 */
+    mov    x20, x1                /* Save dts_addr in x20 */
+
+    /* 1. Configure timer access for EL1 */
+    mrs    x0, CNTHCTL_EL2
+    orr    x0, x0, #3             /* EL1PCEN | EL1PCTEN - enable EL1 timer access */
+    msr    CNTHCTL_EL2, x0
+    msr    CNTVOFF_EL2, xzr       /* Clear virtual timer offset */
+
+    /* 2. Configure virtual processor ID */
+    mrs    x0, MIDR_EL1
+    msr    VPIDR_EL2, x0
+    mrs    x0, MPIDR_EL1
+    msr    VMPIDR_EL2, x0
+
+    /* 3. Disable coprocessor traps to EL2 */
+    mov    x0, #0x33ff            /* CPTR_EL2: RES1 bits, no traps */
+    msr    CPTR_EL2, x0
+    msr    HSTR_EL2, xzr          /* No traps to EL2 on system registers */
+    mov    x0, #(3 << 20)         /* CPACR_EL1: Full FP/SIMD access */
+    msr    CPACR_EL1, x0
+
+    /* 4. Initialize SCTLR_EL1 with safe defaults (RES1 bits, MMU/cache off) */
+    /* RES1 bits: 29,28,23,22,20,11 = 0x30d00800 */
+    movz   x0, #0x800
+    movk   x0, #0x30d0, lsl #16
+    msr    SCTLR_EL1, x0
+
+    /* 5. Migrate stack pointer and vector base to EL1 */
+    /* SP_EL1 must be 16-byte aligned per ARM spec */
+    mov    x0, sp
+    bic    x0, x0, #0xF            /* Ensure 16-byte alignment */
+    msr    SP_EL1, x0
+    mrs    x0, VBAR_EL2
+    msr    VBAR_EL1, x0
+    dsb    sy                     /* Ensure SP_EL1 and VBAR_EL1 writes complete */
+    isb                            /* Ensure writes take effect */
+
+    /* 6. Configure HCR_EL2 - EL1 is AArch64, no hypervisor calls */
+    /* Check if PAuth (Pointer Authentication) is supported */
+    mrs    x0, ID_AA64ISAR1_EL1   /* Read ISA feature register */
+    mov    x1, #(0xF << 28)       /* GPI mask */
+    orr    x1, x1, #(0xF << 24)   /* GPA mask */
+    orr    x1, x1, #(0xF << 8)    /* API mask */
+    orr    x1, x1, #(0xF << 4)    /* APA mask */
+    tst    x0, x1                 /* Test if PAuth supported (Z=1 if not supported) */
+    mov    x0, #(1 << 31)         /* RW: EL1 is AArch64 */
+    orr    x0, x0, #(1 << 29)     /* HCD: Disable HVC instruction */
+    mov    x1, x0                 /* Copy base value */
+    orr    x1, x1, #(1 << 41)     /* API: Trap PAuth instructions */
+    orr    x1, x1, #(1 << 40)     /* APK: Trap PAuth key access */
+    csel   x0, x0, x1, eq         /* If PAuth not supported (eq), use x0 (base), else x1 (with traps) */
+    msr    HCR_EL2, x0
+    dsb    sy                     /* Ensure HCR_EL2 write completes */
+    isb                            /* Ensure HCR_EL2 takes effect */
+
+    /* 7. Set up SPSR_EL2 for return to EL1h with all interrupts masked */
+    /* M[3:0] = 0101 = EL1h (EL1 with SP_EL1) - NOT 0100 which is EL1t! */
+    /* M[4] = 0 = AArch64 mode (bit 4 must be 0 for AArch64, 1 for AArch32) */
+    /* DAIF = 0xF = all interrupts masked */
+    /* Value: 0x3C5 = (0xF << 6) | 0x5 */
+    movz   x0, #0x3C5             /* DAIF=0xF (bits 9:6), M[3:0]=0x5 (EL1h) */
+    msr    SPSR_EL2, x0
+    dsb    sy                     /* Ensure SPSR_EL2 write completes */
+    isb                            /* Ensure SPSR_EL2 takes effect */
+
+    /* 8. Set exception return address and DTB pointer, then ERET */
+    /* Critical: All register writes must complete before eret */
+    msr    ELR_EL2, x19           /* Entry point in ELR_EL2 */
+    mov    x0, x20                 /* DTB address in x0 (first arg) */
+    mov    x1, xzr                 /* Zero remaining argument registers */
+    mov    x2, xzr
+    mov    x3, xzr
+    dsb    sy                     /* Ensure all writes complete */
+    isb                            /* Ensure all effects are visible */
+    eret                           /* Exception return to EL1 */
+
+    /* Should never reach here */
+    b      .
+#endif /* BOOT_EL1 && EL2_HYPERVISOR */
+
+
+/*
+ * Clean entire D-cache to the Point of Coherency (PoC), invalidate the
+ * I-cache to the Point of Unification (PoU), and disable MMU + I/D-cache
+ * at EL2. Returns normally to the caller.
+ *
+ * Terminology (ARM ARM B2.8):
+ *   PoC - Point of Coherency: the point at which all observers (CPUs,
+ *         DMA masters, etc.) see the same memory. Cleaning to PoC
+ *         guarantees the image bytes we memcpy'd are visible to the
+ *         next stage's first uncached instruction fetches.
+ *   PoU - Point of Unification: the point at which instruction and data
+ *         caches converge. Invalidating I-cache to PoU ensures stale
+ *         fetches are discarded before we hand off.
+ *
+ * wolfBoot's startup (line ~347 above) enables MMU+I+D cache at EL2 for
+ * its own use. Any payload we hand off to (Linux kernel, hypervisor,
+ * bare-metal RTOS, a later bootloader stage) expects to enter without
+ * inheriting wolfBoot's translation tables, and the ARM64 Linux boot
+ * protocol (Documentation/arch/arm64/booting.rst) explicitly REQUIRES
+ * MMU off, D-cache off, and the loaded image cleaned to PoC. This
+ * helper performs that teardown and returns; the caller then performs
+ * the actual jump with whatever ABI the payload expects.
+ *
+ * Safe to return because wolfBoot's .text is identity-mapped (VA=PA)
+ * at EL2, so instruction fetch keeps working after SCTLR_EL2.M is
+ * cleared.
+ *
+ * AAPCS64: clobbers x0-x7, x9-x11; x30 (LR) is preserved because the
+ * set/way loop body does not touch it.
+ */
+/* Also built where a HAL tears its own identity MMU down before handoff and
+ * needs this routine's stack-free property, which is orthogonal to whether the
+ * build hands off at EL1. Such a HAL sets WOLFBOOT_AARCH64_MMU_TEARDOWN. */
+#if (defined(EL2_HYPERVISOR) && EL2_HYPERVISOR == 1) || \
+    defined(WOLFBOOT_AARCH64_MMU_TEARDOWN)
+.global el2_flush_and_disable_mmu
+el2_flush_and_disable_mmu:
+    /* ---- 1. Clean & invalidate entire data cache to PoC by set/way ----
+     * Standard ARMv8 routine, adapted from arm-trusted-firmware /
+     * U-Boot / Linux. Iterates every (level, set, way) triple and
+     * issues `dc cisw` on it. Terminates at the Level of Coherency
+     * (LoC) read from CLIDR_EL1. */
+    mrs     x0, clidr_el1
+    and     x3, x0, #0x07000000     /* x3 = LoC (level of coherency) */
+    lsr     x3, x3, #23             /* x3 = LoC * 2 */
+    cbz     x3, .Ldcache_done
+    mov     x10, #0                 /* x10 = current cache level << 1 */
+
+.Ldcache_level_loop:
+    add     x2, x10, x10, lsr #1    /* x2 = level * 3 */
+    lsr     x1, x0, x2              /* x1 = ctype field for this level */
+    and     x1, x1, #7
+    cmp     x1, #2
+    b.lt    .Ldcache_skip_level     /* No data cache at this level */
+    msr     csselr_el1, x10         /* Select cache level (instruction = 0) */
+    isb
+    mrs     x1, ccsidr_el1
+    and     x2, x1, #7              /* x2 = log2(line length) - 4 */
+    add     x2, x2, #4              /* x2 = log2(line length) */
+    mov     x4, #0x3ff
+    and     x4, x4, x1, lsr #3      /* x4 = max way number */
+    clz     w5, w4                  /* x5 = bit position of way size */
+    mov     x7, #0x7fff
+    and     x7, x7, x1, lsr #13     /* x7 = max set number */
+
+.Ldcache_set_loop:
+    mov     x9, x4                  /* x9 = current way */
+.Ldcache_way_loop:
+    lsl     x6, x9, x5
+    orr     x11, x10, x6            /* level | way */
+    lsl     x6, x7, x2
+    orr     x11, x11, x6            /* level | way | set */
+    dc      cisw, x11               /* clean & invalidate by set/way */
+    subs    x9, x9, #1
+    b.ge    .Ldcache_way_loop
+    subs    x7, x7, #1
+    b.ge    .Ldcache_set_loop
+
+.Ldcache_skip_level:
+    add     x10, x10, #2
+    cmp     x3, x10
+    b.gt    .Ldcache_level_loop
+
+.Ldcache_done:
+    mov     x10, #0
+    msr     csselr_el1, x10
+    dsb     sy
+    isb
+
+    /* ---- 2. Invalidate entire I-cache to PoU ----
+     * `ic iallu` invalidates all instruction cache to the Point of
+     * Unification for the local PE. */
+    ic      iallu
+    dsb     ish
+    isb
+
+    /* ---- 3. Disable MMU + I-cache + D-cache at EL2 ----
+     *   SCTLR_EL2.M (bit 0)  = MMU enable
+     *   SCTLR_EL2.C (bit 2)  = D-cache enable
+     *   SCTLR_EL2.I (bit 12) = I-cache enable
+     *
+     * ARM ARM (B2.7.2) requires `dsb sy` before `isb` when modifying
+     * SCTLR_ELx.M so the system register write is observable before the
+     * pipeline is re-synchronized. Matches the MMU-enable sequence used
+     * earlier in this file.
+     */
+    mrs     x0, SCTLR_EL2
+    bic     x0, x0, #(1 << 0)       /* M  */
+    bic     x0, x0, #(1 << 2)       /* C  */
+    bic     x0, x0, #(1 << 12)      /* I  */
+    msr     SCTLR_EL2, x0
+    dsb     sy
+    isb
+
+    ret
+
+/* el2_flush_disable_mmu_and_boot(entry, dts): fused flush, MMU-off and jump
+ * touching NO memory after the disable - with the D-cache off, a stack reload
+ * between a separate flush and jump can read stale DRAM. x20/x21 carry them. */
+.global el2_flush_disable_mmu_and_boot
+el2_flush_disable_mmu_and_boot:
+    /* arm64 boot protocol: all DAIF exceptions masked at kernel entry. */
+    msr     daifset, #0xf
+    mov     x20, x0                 /* entry */
+    mov     x21, x1                 /* dts   */
+    bl      el2_flush_and_disable_mmu
+    /* MMU off; registers only from here. Drop stale EL2 TLB entries. */
+    tlbi    alle2
+    dsb     sy
+    isb
+#if defined(TARGET_imx95_a55) && defined(IMX95_HANDOFF_DUMP)
+    /* Debug crash catcher: report early payload faults via LPUART. */
+    adr     x9, imx95_catch_vectors
+    msr     vbar_el2, x9
+    isb
+#endif
+    mov     x0, x21
+    mov     x1, xzr
+    mov     x2, xzr
+    mov     x3, xzr
+    br      x20
+
+#if defined(TARGET_imx95_a55) && defined(IMX95_HANDOFF_DUMP)
+/* EL2 crash catcher: dump ESR/ELR/FAR over the polled LPUART and park.
+ * Registers only - safe with MMU and caches off. */
+.macro IMX95_CATCH_PUTC reg
+9:  ldr     w11, [x26]
+    tbz     w11, #23, 9b
+    str     \reg, [x27]
+.endm
+
+.balign 2048
+imx95_catch_vectors:
+    .rept 16
+    b       imx95_catch_common
+    .balign 0x80
+    .endr
+
+imx95_catch_common:
+    ldr     x26, =(IMX95_LPUART1_BASE + LPUART_STAT_OFF)
+    ldr     x27, =(IMX95_LPUART1_BASE + LPUART_DATA_OFF)
+    /* "\r\nVEC " */
+    mov     w10, #'\r'
+    IMX95_CATCH_PUTC w10
+    mov     w10, #'\n'
+    IMX95_CATCH_PUTC w10
+    mov     w10, #'V'
+    IMX95_CATCH_PUTC w10
+    mov     w10, #'E'
+    IMX95_CATCH_PUTC w10
+    mov     w10, #'C'
+    IMX95_CATCH_PUTC w10
+    mrs     x12, esr_el2
+    bl      imx95_catch_hex
+    mrs     x12, elr_el2
+    bl      imx95_catch_hex
+    mrs     x12, far_el2
+    bl      imx95_catch_hex
+1:  wfe
+    b       1b
+
+/* print ' ' + x12 as 16 hex digits; clobbers x10-x14, uses x30 */
+imx95_catch_hex:
+    mov     w10, #' '
+    IMX95_CATCH_PUTC w10
+    mov     x13, #60
+2:  lsr     x14, x12, x13
+    and     x14, x14, #0xf
+    cmp     x14, #10
+    b.lt    3f
+    add     w10, w14, #('a' - 10)
+    b       4f
+3:  add     w10, w14, #'0'
+4:  IMX95_CATCH_PUTC w10
+    subs    x13, x13, #4
+    b.ge    2b
+    ret
+#endif /* TARGET_imx95_a55 && IMX95_HANDOFF_DUMP */
+#endif /* EL2_HYPERVISOR || WOLFBOOT_AARCH64_MMU_TEARDOWN */
+
+#if defined(WOLFBOOT_ZYNQMP_FSBL)
+/*
+ * void el3_jump_to_entry(uintptr_t entry)
+ *
+ * Generic AArch64 EL3 exit primitive: cleans & invalidates the entire D-cache
+ * to the PoC, invalidates the I-cache, disables the EL3 MMU + I/D-caches, then
+ * branches to the given entry point at EL3 with the MMU off. Not ZynqMP-
+ * specific -- reusable by any AArch64 EL3-FSBL target that hands off to a
+ * next-stage image entered at EL3 (here BL31, mirroring the stock ZynqMP FSBL's
+ * XFsbl_Exit()). Any handoff parameters are the caller's responsibility (the
+ * ZynqMP caller publishes them via PMU_GLOBAL scratch in hal/zynqmp_atf.c
+ * beforehand), so no GP-register arguments are used here.
+ *
+ * x0: entry. The set/way loop below clobbers x0-x11, so the entry point is
+ * preserved in x19 (callee-saved, untouched by the loop). Does not return.
+ */
+.global el3_jump_to_entry
+el3_jump_to_entry:
+    mov     x19, x0                 /* preserve entry point across the loop */
+
+    /* ---- 1. Clean & invalidate entire data cache to PoC by set/way ---- */
+    mrs     x0, clidr_el1
+    and     x3, x0, #0x07000000     /* x3 = LoC (level of coherency) */
+    lsr     x3, x3, #23             /* x3 = LoC * 2 */
+    cbz     x3, .Latf_dcache_done
+    mov     x10, #0                 /* x10 = current cache level << 1 */
+
+.Latf_dcache_level_loop:
+    add     x2, x10, x10, lsr #1    /* x2 = level * 3 */
+    lsr     x1, x0, x2              /* x1 = ctype field for this level */
+    and     x1, x1, #7
+    cmp     x1, #2
+    b.lt    .Latf_dcache_skip_level /* No data cache at this level */
+    msr     csselr_el1, x10         /* Select cache level (instruction = 0) */
+    isb
+    mrs     x1, ccsidr_el1
+    and     x2, x1, #7              /* x2 = log2(line length) - 4 */
+    add     x2, x2, #4              /* x2 = log2(line length) */
+    mov     x4, #0x3ff
+    and     x4, x4, x1, lsr #3      /* x4 = max way number */
+    clz     w5, w4                  /* x5 = bit position of way size */
+    mov     x7, #0x7fff
+    and     x7, x7, x1, lsr #13     /* x7 = max set number */
+
+.Latf_dcache_set_loop:
+    mov     x9, x4                  /* x9 = current way */
+.Latf_dcache_way_loop:
+    lsl     x6, x9, x5
+    orr     x11, x10, x6            /* level | way */
+    lsl     x6, x7, x2
+    orr     x11, x11, x6            /* level | way | set */
+    dc      cisw, x11               /* clean & invalidate by set/way */
+    subs    x9, x9, #1
+    b.ge    .Latf_dcache_way_loop
+    subs    x7, x7, #1
+    b.ge    .Latf_dcache_set_loop
+
+.Latf_dcache_skip_level:
+    add     x10, x10, #2
+    cmp     x3, x10
+    b.gt    .Latf_dcache_level_loop
+
+.Latf_dcache_done:
+    mov     x10, #0
+    msr     csselr_el1, x10
+    dsb     sy
+    isb
+
+    /* ---- 2. Invalidate entire I-cache to PoU ---- */
+    ic      iallu
+    dsb     ish
+    isb
+
+    /* ---- 3. Disable MMU + I-cache + D-cache at EL3 ---- */
+    mrs     x0, SCTLR_EL3
+    bic     x0, x0, #(1 << 0)       /* M  */
+    bic     x0, x0, #(1 << 2)       /* C  */
+    bic     x0, x0, #(1 << 12)      /* I  */
+    msr     SCTLR_EL3, x0
+    dsb     sy
+    isb
+
+    /* ---- 4. Branch to BL31 (does not return) ---- */
+    br      x19
+#endif /* WOLFBOOT_ZYNQMP_FSBL */
+
+.end

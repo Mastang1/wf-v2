@@ -1,0 +1,2242 @@
+WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/asn.o \
+  $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/coding.o
+
+# Shared wolfHSM client/server object lists. Defined here at the top so any
+# downstream block (legacy WOLFHSM_CLIENT/SERVER, or WOLFCRYPT_TZ_WOLFHSM TZ
+# engine) can reference them by variable name without ordering hazards.
+WOLFHSM_CLIENT_OBJS := \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_client.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_client_nvm.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_client_cryptocb.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_client_crypto.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_client_dma.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_crypto.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_dma.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_utils.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_comm.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_comm.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_nvm.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_customcb.o
+
+WOLFHSM_SERVER_OBJS := \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_utils.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_comm.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_nvm.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_nvm_flash.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_keyid.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_flash_unit.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_crypto.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_dma.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_server_dma.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_server.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_server_nvm.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_server_crypto.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_server_counter.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_server_keystore.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_server_customcb.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_customcb.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_keystore.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_crypto.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_counter.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_nvm.o \
+  $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_comm.o
+
+USE_CLANG?=0
+USE_ARMCLANG?=0
+ifneq ($(filter 1,$(USE_CLANG) $(USE_ARMCLANG)),)
+  USE_GCC?=0
+else
+  USE_GCC?=1
+endif
+WOLFBOOT_TEST_FILLER?=0
+WOLFBOOT_TIME_TEST?=0
+
+ifeq ($(USE_CLANG),1)
+  ifeq ($(USE_GCC),1)
+    $(error USE_CLANG=1 is incompatible with USE_GCC=1; set USE_GCC=0)
+  endif
+  ifeq ($(ARMORED),1)
+    $(error USE_CLANG=1 requires ARMORED=0)
+  endif
+endif
+
+ifeq ($(USE_ARMCLANG),1)
+  ifeq ($(USE_GCC),1)
+    $(error USE_ARMCLANG=1 is incompatible with USE_GCC=1; set USE_GCC=0)
+  endif
+  ifeq ($(USE_CLANG),1)
+    $(error USE_ARMCLANG=1 is incompatible with USE_CLANG=1)
+  endif
+  ifeq ($(ARMORED),1)
+    $(error USE_ARMCLANG=1 requires ARMORED=0)
+  endif
+endif
+
+# Support for Built-in ROT into OTP flash memory
+ifeq ($(FLASH_OTP_KEYSTORE),1)
+    CFLAGS+=-D"FLASH_OTP_KEYSTORE"
+endif
+
+ifeq ($(WOLFBOOT_TEST_FILLER),1)
+    CFLAGS+=-D"WOLFBOOT_TEST_FILLER"
+endif
+
+ifeq ($(WOLFBOOT_TIME_TEST),1)
+    CFLAGS+=-D"WOLFBOOT_TIME_TEST"
+endif
+
+# Persist update/boot/rollback failure diagnostics to a dedicated flash region
+ifeq ($(WOLFBOOT_PERSIST_FAILURE_STATUS),1)
+    CFLAGS+=-D"WOLFBOOT_PERSIST_FAILURE_STATUS"
+    ifneq ($(WOLFBOOT_DIAGNOSTICS_ADDRESS),)
+        CFLAGS+=-D"WOLFBOOT_DIAGNOSTICS_ADDRESS=$(WOLFBOOT_DIAGNOSTICS_ADDRESS)"
+    endif
+    ifneq ($(WOLFBOOT_DIAGNOSTICS_SECTORS),)
+        CFLAGS+=-D"WOLFBOOT_DIAGNOSTICS_SECTORS=$(WOLFBOOT_DIAGNOSTICS_SECTORS)"
+    endif
+    ifneq ($(WOLFBOOT_DIAGNOSTICS_RECORD_SIZE),)
+        CFLAGS+=-D"WOLFBOOT_DIAGNOSTICS_RECORD_SIZE=$(WOLFBOOT_DIAGNOSTICS_RECORD_SIZE)"
+    endif
+    ifeq ($(WOLFBOOT_DIAGNOSTICS_EXT),1)
+        CFLAGS+=-D"WOLFBOOT_DIAGNOSTICS_EXT"
+    endif
+endif
+
+# Support for TPM signature verification
+ifeq ($(WOLFBOOT_TPM_VERIFY),1)
+  WOLFTPM:=1
+  CFLAGS+=-D"WOLFBOOT_TPM_VERIFY"
+endif
+
+## Measured boot requires TPM to be present
+ifeq ($(MEASURED_BOOT),1)
+  WOLFTPM:=1
+  CFLAGS+=-D"WOLFBOOT_MEASURED_BOOT"
+  CFLAGS+=-D"WOLFBOOT_MEASURED_PCR_A=$(MEASURED_PCR_A)"
+  ifneq ($(MEASURED_PCR_OS),)
+    CFLAGS+=-D"WOLFBOOT_MEASURED_PCR_OS=$(MEASURED_PCR_OS)"
+  endif
+  ifeq ($(MEASURED_BOOT_APP_PARTITION),1)
+    CFLAGS+=-D"WOLFBOOT_MEASURED_BOOT_APP_PARTITION"
+  endif
+endif
+
+## Measured boot via the platform firmware TPM behind EFI_TCG2_PROTOCOL, for
+## UEFI-application targets (e.g. aarch64_efi on NVIDIA Jetson). wolfBoot
+## measures the verified next-stage image into a PCR with HashLogExtendEvent;
+## the firmware / fTPM owns the TPM, so this pulls in NO wolfTPM transport.
+ifeq ($(MEASURED_BOOT_TCG2),1)
+  MEASURED_PCR_A ?= 9
+  CFLAGS+=-D"WOLFBOOT_MEASURED_BOOT_EFI_TCG2"
+  CFLAGS+=-D"WOLFBOOT_MEASURED_PCR_A=$(MEASURED_PCR_A)"
+endif
+
+## TPM keystore
+ifeq ($(WOLFBOOT_TPM_KEYSTORE),1)
+  WOLFTPM:=1
+  CFLAGS+=-D"WOLFBOOT_TPM_KEYSTORE"
+  ifneq ($(WOLFBOOT_TPM_KEYSTORE_AUTH),)
+    CFLAGS+=-DWOLFBOOT_TPM_KEYSTORE_AUTH='"$(WOLFBOOT_TPM_KEYSTORE_AUTH)"'
+  endif
+  ifneq ($(WOLFBOOT_TPM_KEYSTORE_NV_BASE),)
+    CFLAGS+=-D"WOLFBOOT_TPM_KEYSTORE_NV_BASE=$(WOLFBOOT_TPM_KEYSTORE_NV_BASE)"
+  endif
+endif
+
+## TPM manufacturing identity: precomputed per-device authValue is the default
+## (no master secret on device). Opt into on-device derive-from-master mode:
+ifeq ($(WOLFBOOT_TPM_MFG_AUTH_DERIVE),1)
+  CFLAGS+=-D"WOLFBOOT_TPM_MFG_AUTH_DERIVE"
+endif
+
+ifeq ($(WOLFBOOT_ATTESTATION_IAK),1)
+  CFLAGS+=-D"WOLFBOOT_ATTESTATION_IAK"
+endif
+
+ifeq ($(WOLFBOOT_UDS_UID_FALLBACK_FORTEST),1)
+  $(warning WOLFBOOT_UDS_UID_FALLBACK_FORTEST=1 derives UDS from the publicly-readable device UID; do not use in production)
+  CFLAGS+=-D"WOLFBOOT_UDS_UID_FALLBACK_FORTEST"
+endif
+
+ifeq ($(WOLFBOOT_UDS_OBKEYS),1)
+  ifneq ($(TARGET),stm32h5)
+    $(error WOLFBOOT_UDS_OBKEYS is only supported on STM32H5 targets)
+  endif
+  CFLAGS+=-D"WOLFBOOT_UDS_OBKEYS"
+endif
+
+## Sealing a secret into the TPM
+ifeq ($(WOLFBOOT_TPM_SEAL),1)
+  WOLFTPM:=1
+  CFLAGS+=-D"WOLFBOOT_TPM_SEAL"
+  ifneq ($(WOLFBOOT_TPM_SEAL_AUTH),)
+    CFLAGS+=-DWOLFBOOT_TPM_SEAL_AUTH='"$(WOLFBOOT_TPM_SEAL_AUTH)"'
+  endif
+  ifneq ($(WOLFBOOT_TPM_SEAL_NV_BASE),)
+    CFLAGS+=-D"WOLFBOOT_TPM_SEAL_NV_BASE=$(WOLFBOOT_TPM_SEAL_NV_BASE)"
+  endif
+  ifneq ($(WOLFBOOT_TPM_SEAL_KEY_ID),)
+    CFLAGS+=-D"WOLFBOOT_TPM_SEAL_KEY_ID=$(WOLFBOOT_TPM_SEAL_KEY_ID)"
+  endif
+  ifneq ($(POLICY_FILE),)
+    SIGN_OPTIONS+=--policy $(POLICY_FILE)
+  endif
+endif
+
+## Monolithic self-update: erase covers fw_size so the payload can span
+## the bootloader region into the contiguous boot partition.
+ifeq ($(WOLFBOOT_SELF_UPDATE_MONOLITHIC),1)
+  SELF_UPDATE_MONOLITHIC:=1
+endif
+ifeq ($(SELF_UPDATE_MONOLITHIC),1)
+  CFLAGS+=-DWOLFBOOT_SELF_UPDATE_MONOLITHIC
+  DISABLE_BACKUP=1
+endif
+
+## Persist wolfBoot self header at fixed address
+## Invariants and defaults are enforced in wolfboot.h
+ifeq ($(WOLFBOOT_SELF_HEADER),1)
+  CFLAGS+=-DWOLFBOOT_SELF_HEADER
+  ifeq ($(WOLFBOOT_PARTITION_SELF_HEADER_ADDRESS),)
+    $(error WOLFBOOT_PARTITION_SELF_HEADER_ADDRESS must be set when WOLFBOOT_SELF_HEADER=1)
+  endif
+  ifneq ($(WOLFBOOT_SELF_HEADER_SIZE),)
+    CFLAGS+=-D"WOLFBOOT_SELF_HEADER_SIZE=$(WOLFBOOT_SELF_HEADER_SIZE)"
+  endif
+  ifeq ($(SELF_HEADER_EXT),1)
+    CFLAGS+=-DWOLFBOOT_SELF_HEADER_EXT
+  endif
+endif
+
+## DSA Settings
+ifeq ($(SIGN),NONE)
+  ifeq ($(WOLFBOOT_SECURE_APP),1)
+    $(error SIGN=NONE is incompatible with the authenticated secure-app handoff)
+  endif
+  $(warning SIGN=NONE / WOLFBOOT_NO_SIGN=1 disables firmware signature verification; images are NOT authenticated. Do not use in production.)
+  SIGN_OPTIONS+=--no-sign
+  ifeq ($(HASH),SHA384)
+    STACK_USAGE=3760
+  else
+    STACK_USAGE=1216
+  endif
+
+  CFLAGS+=-DWOLFBOOT_NO_SIGN
+endif
+
+ifeq ($(IMAGE_HEADER_SIZE),)
+  IMAGE_HEADER_SIZE=256
+endif
+
+ifeq ($(WOLFBOOT_SMALL_STACK),1)
+  CFLAGS+=-D"WOLFBOOT_SMALL_STACK" -D"XMALLOC_USER"
+  STACK_USAGE=4096
+  OBJS+=./src/xmalloc.o
+endif
+
+# GCC 13 overestimates some wolfTPM wrapper stack usage; keep TPM
+# limits above 10 KB to avoid false -Wstack-usage failures.
+STACK_USAGE_WOLFTPM=10680
+
+
+ECC_OBJS= \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/ecc.o
+
+ED25519_OBJS=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha512.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/ed25519.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/ge_low_mem.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/fe_low_mem.o
+
+ED448_OBJS=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/ed448.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/ge_low_mem.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/ge_448.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/fe_448.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/fe_low_mem.o
+
+RSA_OBJS=\
+    $(RSA_EXTRA_OBJS) \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/rsa.o
+
+LMS_OBJS=\
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/wc_lms.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/wc_lms_impl.o
+
+LMS_EXTRA=\
+    -D"WOLFSSL_HAVE_LMS" \
+    -D"WOLFSSL_WC_LMS_SMALL" \
+    -D"WOLFSSL_LMS_MAX_LEVELS=$(LMS_LEVELS)" \
+    -D"WOLFSSL_LMS_MAX_HEIGHT=$(LMS_HEIGHT)" \
+    -D"LMS_LEVELS=$(LMS_LEVELS)" -D"LMS_HEIGHT=$(LMS_HEIGHT)" \
+    -D"LMS_WINTERNITZ=$(LMS_WINTERNITZ)" \
+    -D"LMS_IMAGE_SIGNATURE_SIZE"=$(IMAGE_SIGNATURE_SIZE) \
+    -D"WOLFSSL_LMS_VERIFY_ONLY"
+
+XMSS_OBJS=\
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/wc_xmss.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/wc_xmss_impl.o
+
+XMSS_EXTRA=\
+    -D"WOLFSSL_HAVE_XMSS" \
+    -D"WOLFSSL_WC_XMSS_SMALL" \
+    -DWOLFBOOT_XMSS_PARAMS=\"$(XMSS_PARAMS)\"  \
+    -D"XMSS_IMAGE_SIGNATURE_SIZE"=$(IMAGE_SIGNATURE_SIZE) \
+    -D"WOLFSSL_XMSS_VERIFY_ONLY" -D"WOLFSSL_XMSS_MAX_HEIGHT=32"
+
+ML_DSA_OBJS=\
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/wc_mldsa.o
+
+ML_DSA_EXTRA=\
+    -D"ML_DSA_IMAGE_SIGNATURE_SIZE"=$(IMAGE_SIGNATURE_SIZE) \
+    -D"ML_DSA_LEVEL"=$(ML_DSA_LEVEL)
+
+ifeq ($(SIGN),ECC256)
+  KEYGEN_OPTIONS+=--ecc256
+  SIGN_OPTIONS+=--ecc256
+  WOLFCRYPT_OBJS+=$(ECC_OBJS)
+  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_ECC256"
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+       STACK_USAGE=4096
+  else
+    ifeq ($(WOLFTPM),1)
+      STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+    else
+      ifneq ($(SPMATH),1)
+        STACK_USAGE=5264
+      else
+        STACK_USAGE=7632
+      endif
+    endif
+  endif
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 256; echo $$?),0)
+    IMAGE_HEADER_SIZE=256
+  endif
+endif
+
+ifeq ($(SIGN),ECC384)
+  KEYGEN_OPTIONS+=--ecc384
+  SIGN_OPTIONS+=--ecc384
+  WOLFCRYPT_OBJS+=$(ECC_OBJS)
+  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_ECC384"
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+       STACK_USAGE=5880
+  else
+    ifeq ($(WOLFTPM),1)
+      STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+    else
+      ifneq ($(SPMATH),1)
+        STACK_USAGE=11248
+      else
+        STACK_USAGE=11216
+      endif
+    endif
+  endif
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 512; echo $$?),0)
+    IMAGE_HEADER_SIZE=512
+  endif
+endif
+
+ifeq ($(SIGN),ECC521)
+  KEYGEN_OPTIONS+=--ecc521
+  SIGN_OPTIONS+=--ecc521
+  CFLAGS+=-D"WOLFBOOT_SIGN_ECC521"
+  WOLFCRYPT_OBJS+=$(ECC_OBJS)
+  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+       STACK_USAGE=4096
+  else
+    ifeq ($(WOLFTPM),1)
+      STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+    else
+      ifneq ($(SPMATH),1)
+        STACK_USAGE=11256
+      else
+        STACK_USAGE=8480
+      endif
+    endif
+  endif
+
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 512; echo $$?),0)
+    IMAGE_HEADER_SIZE=512
+  endif
+endif
+
+ifeq ($(SIGN),ED25519)
+  KEYGEN_OPTIONS+=--ed25519
+  SIGN_OPTIONS+=--ed25519
+  WOLFCRYPT_OBJS+=$(ED25519_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_ED25519"
+  ifeq ($(WOLFTPM),1)
+    STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+  else
+    STACK_USAGE?=5000
+  endif
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 256; echo $$?),0)
+    IMAGE_HEADER_SIZE=256
+  endif
+endif
+
+ifeq ($(SIGN),ED448)
+  KEYGEN_OPTIONS+=--ed448
+  SIGN_OPTIONS+=--ed448
+  WOLFCRYPT_OBJS+= $(ED448_OBJS)
+  ifeq ($(WOLFTPM),1)
+    STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+  else
+    ifeq ($(WOLFBOOT_SMALL_STACK),1)
+      STACK_USAGE?=1024
+    else
+      STACK_USAGE?=4578
+    endif
+  endif
+
+
+  ifneq ($(HASH),SHA3)
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha3.o
+  endif
+  CFLAGS+=-D"WOLFBOOT_SIGN_ED448"
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 512; echo $$?),0)
+    IMAGE_HEADER_SIZE=512
+  endif
+endif
+
+ifeq ($(SIGN),RSAPSS2048)
+  KEYGEN_OPTIONS+=--rsapss2048
+  SIGN_OPTIONS+=--rsapss2048
+  SIGN_ALG=RSAPSS2048
+  WOLFCRYPT_OBJS+= $(RSA_OBJS)
+  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_RSAPSS2048" $(RSA_EXTRA_CFLAGS)
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    ifneq ($(SPMATH),1)
+      STACK_USAGE=5008
+    else
+      STACK_USAGE=4096
+    endif
+  else
+    ifeq ($(WOLFTPM),1)
+      STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+    else
+      ifneq ($(SPMATH),1)
+        STACK_USAGE=35952
+      else
+        STACK_USAGE=17568
+      endif
+    endif
+  endif
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 512; echo $$?),0)
+    IMAGE_HEADER_SIZE=512
+  endif
+endif
+
+ifeq ($(SIGN),RSAPSS3072)
+  KEYGEN_OPTIONS+=--rsapss3072
+  SIGN_OPTIONS+=--rsapss3072
+  SIGN_ALG=RSAPSS3072
+  WOLFCRYPT_OBJS+= $(RSA_OBJS)
+  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_RSAPSS3072" $(RSA_EXTRA_CFLAGS)
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    ifneq ($(SPMATH),1)
+      STACK_USAGE=5008
+    else
+      STACK_USAGE=4364
+    endif
+  else
+    ifeq ($(WOLFTPM),1)
+      STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+    else
+      ifneq ($(SPMATH),1)
+        STACK_USAGE=52592
+      else
+        STACK_USAGE=12288
+      endif
+    endif
+  endif
+  ifneq ($(HASH),SHA256)
+    ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 1024; echo $$?),0)
+      IMAGE_HEADER_SIZE=1024
+    endif
+  endif
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 512; echo $$?),0)
+    IMAGE_HEADER_SIZE=512
+  endif
+endif
+
+ifeq ($(SIGN),RSAPSS4096)
+  KEYGEN_OPTIONS+=--rsapss4096
+  SIGN_OPTIONS+=--rsapss4096
+  SIGN_ALG=RSAPSS4096
+  WOLFCRYPT_OBJS+= $(RSA_OBJS)
+  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_RSAPSS4096" $(RSA_EXTRA_CFLAGS)
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    ifneq ($(SPMATH),1)
+      STACK_USAGE=5888
+    else
+      STACK_USAGE=5768
+    endif
+  else
+    ifeq ($(WOLFTPM),1)
+      STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+    else
+      ifneq ($(SPMATH),1)
+        STACK_USAGE=69232
+      else
+        STACK_USAGE=18064
+      endif
+    endif
+  endif
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 1024; echo $$?),0)
+    IMAGE_HEADER_SIZE=1024
+  endif
+endif
+
+ifneq ($(findstring RSA2048,$(SIGN)),)
+  KEYGEN_OPTIONS+=--rsa2048
+  ifeq ($(SIGN),RSA2048ENC)
+    SIGN_OPTIONS+=--rsa2048enc
+  else
+    SIGN_OPTIONS+=--rsa2048
+  endif
+  SIGN_ALG=RSA2048 # helps keystore.c check
+  WOLFCRYPT_OBJS+= $(RSA_OBJS)
+  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_RSA2048" $(RSA_EXTRA_CFLAGS)
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    ifneq ($(SPMATH),1)
+      STACK_USAGE=5008
+    else
+      STACK_USAGE=4096
+    endif
+  else
+    ifeq ($(WOLFTPM),1)
+      STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+    else
+      ifneq ($(SPMATH),1)
+        STACK_USAGE=35952
+      else
+        STACK_USAGE=17568
+      endif
+    endif
+  endif
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 512; echo $$?),0)
+    IMAGE_HEADER_SIZE=512
+  endif
+endif
+
+ifneq ($(findstring RSA3072,$(SIGN)),)
+  KEYGEN_OPTIONS+=--rsa3072
+  ifeq ($(SIGN),RSA3072ENC)
+    SIGN_OPTIONS+=--rsa3072enc
+  else
+    SIGN_OPTIONS+=--rsa3072
+  endif
+  SIGN_ALG=RSA3072 # helps keystore.c check
+  WOLFCRYPT_OBJS+= $(RSA_OBJS)
+  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_RSA3072" $(RSA_EXTRA_CFLAGS)
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    ifneq ($(SPMATH),1)
+      STACK_USAGE=5008
+    else
+      STACK_USAGE=4364
+    endif
+  else
+    ifeq ($(WOLFTPM),1)
+      STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+    else
+      ifneq ($(SPMATH),1)
+        STACK_USAGE=52592
+      else
+        STACK_USAGE=12288
+      endif
+    endif
+  endif
+  ifneq ($(HASH),SHA256)
+    ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 1024; echo $$?),0)
+      IMAGE_HEADER_SIZE=1024
+    endif
+  endif
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 512; echo $$?),0)
+    IMAGE_HEADER_SIZE=512
+  endif
+endif
+
+ifneq ($(findstring RSA4096,$(SIGN)),)
+  SIGN:=RSA4096
+  KEYGEN_OPTIONS+=--rsa4096
+  ifeq ($(SIGN),RSA4096ENC)
+    SIGN_OPTIONS+=--rsa4096enc
+  else
+    SIGN_OPTIONS+=--rsa4096
+  endif
+  SIGN_ALG=RSA4096 # helps keystore.c check
+  WOLFCRYPT_OBJS+= $(RSA_OBJS)
+  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_RSA4096" $(RSA_EXTRA_CFLAGS)
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    ifneq ($(SPMATH),1)
+      STACK_USAGE=5888
+    else
+      STACK_USAGE=5768
+    endif
+  else
+    ifeq ($(WOLFTPM),1)
+      STACK_USAGE=$(STACK_USAGE_WOLFTPM)
+    else
+      ifneq ($(SPMATH),1)
+        STACK_USAGE=69232
+      else
+        STACK_USAGE=18064
+      endif
+    endif
+  endif
+  ifeq ($(shell test $(IMAGE_HEADER_SIZE) -lt 1024; echo $$?),0)
+    IMAGE_HEADER_SIZE=1024
+  endif
+endif
+
+ifeq ($(SIGN),LMS)
+  # For LMS the signature size is a function of the LMS parameters.
+  # All five of these parms must be set in the LMS .config file:
+  #   LMS_LEVELS, LMS_HEIGHT, LMS_WINTERNITZ, IMAGE_SIGNATURE_SIZE,
+  #   IMAGE_HEADER_SIZE
+
+  ifndef LMS_LEVELS
+    $(error LMS_LEVELS not set)
+  endif
+
+  ifndef LMS_HEIGHT
+    $(error LMS_HEIGHT not set)
+  endif
+
+  ifndef LMS_WINTERNITZ
+    $(error LMS_WINTERNITZ not set)
+  endif
+
+  ifndef IMAGE_SIGNATURE_SIZE
+    $(error IMAGE_SIGNATURE_SIZE not set)
+  endif
+
+  ifndef IMAGE_HEADER_SIZE
+    $(error IMAGE_HEADER_SIZE not set)
+  endif
+endif
+
+ifeq ($(SIGN),LMS)
+  KEYGEN_OPTIONS+=--lms
+  SIGN_OPTIONS+=--lms
+  WOLFCRYPT_OBJS+= $(LMS_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_LMS" $(LMS_EXTRA)
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    $(error WOLFBOOT_SMALL_STACK with LMS not supported)
+  else
+    STACK_USAGE=1320
+  endif
+endif
+
+ifeq ($(SIGN),XMSS)
+  ifndef XMSS_PARAMS
+    $(error XMSS_PARAMS not set)
+  endif
+
+  ifndef IMAGE_SIGNATURE_SIZE
+    $(error IMAGE_SIGNATURE_SIZE not set)
+  endif
+
+  ifndef IMAGE_HEADER_SIZE
+    $(error IMAGE_HEADER_SIZE not set)
+  endif
+endif
+
+ifeq ($(SIGN),XMSS)
+  # Use wc_xmss implementation.
+  KEYGEN_OPTIONS+=--xmss
+  SIGN_OPTIONS+=--xmss
+  WOLFCRYPT_OBJS+=$(XMSS_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_XMSS"
+  CFLAGS+=$(XMSS_EXTRA)
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    $(error WOLFBOOT_SMALL_STACK with XMSS not supported)
+  else
+    STACK_USAGE=9352
+  endif
+endif
+
+ifeq ($(SIGN),ML_DSA)
+  # Use wolfcrypt ML-DSA implementation.
+  KEYGEN_OPTIONS+=--ml_dsa
+  SIGN_OPTIONS+=--ml_dsa
+  WOLFCRYPT_OBJS+= $(ML_DSA_OBJS)
+  CFLAGS+=-D"WOLFBOOT_SIGN_ML_DSA" $(ML_DSA_EXTRA)
+  ifneq ($(HASH),SHA3)
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha3.o
+  endif
+
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    $(error WOLFBOOT_SMALL_STACK with ML-DSA not supported yet)
+  else
+    STACK_USAGE=25000
+  endif
+endif
+
+ifneq ($(SIGN_SECONDARY),)
+  LOWERCASE_SECONDARY=$(shell echo $(SIGN_SECONDARY) | tr '[:upper:]' '[:lower:]')
+  SECONDARY_KEYGEN_OPTIONS=--$(LOWERCASE_SECONDARY)
+  SECONDARY_SIGN_OPTIONS=--$(LOWERCASE_SECONDARY)
+  CFLAGS+=-DSIGN_HYBRID
+  CFLAGS+=-DWOLFBOOT_SIGN_SECONDARY_$(SIGN_SECONDARY)
+  ifeq ($(SIGN_SECONDARY),RSA2048)
+    WOLFCRYPT_OBJS+=$(RSA_OBJS)
+    WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),RSA3072)
+    WOLFCRYPT_OBJS+=$(RSA_OBJS)
+    WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),RSA4096)
+    WOLFCRYPT_OBJS+=$(RSA_OBJS)
+    WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),RSAPSS2048)
+    WOLFCRYPT_OBJS+=$(RSA_OBJS)
+    WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),RSAPSS3072)
+    WOLFCRYPT_OBJS+=$(RSA_OBJS)
+    WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),RSAPSS4096)
+    WOLFCRYPT_OBJS+=$(RSA_OBJS)
+    WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),ECC256)
+    WOLFCRYPT_OBJS+=$(ECC_OBJS)
+    WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),ECC384)
+    WOLFCRYPT_OBJS+=$(ECC_OBJS)
+    WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),ECC521)
+    WOLFCRYPT_OBJS+=$(ECC_OBJS)
+    WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),ED25519)
+    WOLFCRYPT_OBJS+=$(ED25519_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),ED448)
+    WOLFCRYPT_OBJS+=$(ED448_OBJS)
+  endif
+  ifeq ($(SIGN_SECONDARY),LMS)
+    WOLFCRYPT_OBJS+=$(LMS_OBJS)
+    CFLAGS+=-D"WOLFBOOT_SIGN_LMS" $(LMS_EXTRA)
+  endif
+  ifeq ($(SIGN_SECONDARY),XMSS)
+    WOLFCRYPT_OBJS+= $(XMSS_OBJS)
+    CFLAGS+=-D"WOLFBOOT_SIGN_XMSS" $(XMSS_EXTRA)
+  endif
+  ifeq ($(SIGN_SECONDARY),ML_DSA)
+    WOLFCRYPT_OBJS+= $(ML_DSA_OBJS)
+    ifneq ($(HASH),SHA3)
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha3.o
+    endif
+    CFLAGS+=-D"WOLFBOOT_SIGN_ML_DSA" $(ML_DSA_EXTRA)
+  endif
+endif
+
+
+ifeq ($(RAM_CODE),1)
+  CFLAGS+= -D"RAM_CODE"
+endif
+
+ifeq ($(FLAGS_HOME),1)
+  CFLAGS+=-D"FLAGS_HOME=1"
+endif
+
+ifeq ($(FLAGS_INVERT),1)
+  CFLAGS+=-D"WOLFBOOT_FLAGS_INVERT=1"
+  FILL_BYTE?=0x00
+else
+  FILL_BYTE?=0xFF
+endif
+CFLAGS+=-D"FILL_BYTE=$(FILL_BYTE)"
+
+
+ifeq ($(DUALBANK_SWAP),1)
+  CFLAGS+=-D"DUALBANK_SWAP=1"
+endif
+
+ifeq ($(SPI_FLASH),1)
+  EXT_FLASH=1
+  CFLAGS+=-D"SPI_FLASH=1"
+  OBJS+= src/spi_flash.o
+  ifeq ($(ARCH),RENESAS_RX)
+    WOLFCRYPT_OBJS+=hal/spi/spi_drv_renesas_rx.o
+  else
+    WOLFCRYPT_OBJS+=hal/spi/spi_drv_$(SPI_TARGET).o
+  endif
+endif
+
+ifeq ($(OCTOSPI_FLASH),1)
+  EXT_FLASH=1
+  QSPI_FLASH=1
+  CFLAGS+=-D"OCTOSPI_FLASH=1"
+endif
+
+ifeq ($(QSPI_FLASH),1)
+  EXT_FLASH=1
+  CFLAGS+=-D"QSPI_FLASH=1"
+  OBJS+= src/qspi_flash.o
+  ifeq ($(ARCH),RENESAS_RX)
+    WOLFCRYPT_OBJS+=hal/spi/spi_drv_renesas_rx.o
+  else
+    WOLFCRYPT_OBJS+=hal/spi/spi_drv_$(SPI_TARGET).o
+  endif
+endif
+
+# SD Card support (Cadence SDHCI controller)
+ifeq ($(DISK_SDCARD),1)
+  CFLAGS+=-D"DISK_SDCARD=1"
+endif
+
+# eMMC support (Cadence SDHCI controller)
+ifeq ($(DISK_EMMC),1)
+  CFLAGS+=-D"DISK_EMMC=1"
+endif
+
+# Add the SD/eMMC block driver if SD card or eMMC is enabled (only once).
+# DISK_DRIVER picks one: Cadence SDHCI (src/sdhci.c, default), Freescale eSDHC
+# (hal/nxp_esdhc.o) or i.MX uSDHC (hal/imx95_a55.c), set by the target's arch.mk.
+# Exactly one may link: they all define the disk_* entry points.
+DISK_DRIVER?=cadence
+ifneq ($(filter 1,$(DISK_SDCARD) $(DISK_EMMC)),)
+  ifeq ($(DISK_DRIVER),cadence)
+    OBJS+= src/sdhci.o
+  endif
+endif
+
+# Optional boot confirmation and rollback for disk boot (src/update_disk.c).
+# wolfBoot marks the slot it boots as TESTING in the last sector of that raw
+# partition; the OS clears it to SUCCESS once it is up. A slot still marked
+# TESTING on the next boot did not come up and is failed over. Off by default,
+# so every existing disk target keeps its stateless select-verify-boot
+# behaviour. Raw partitions only: a DISK_FS slot has no partition tail to use.
+DISK_BOOT_CONFIRM ?= 0
+ifeq ($(DISK_BOOT_CONFIRM),1)
+  ifeq ($(WOLFBOOT_TARGET_BUILD),1)
+    ifeq (,$(findstring WOLFBOOT_UPDATE_DISK,$(CFLAGS)))
+      $(error DISK_BOOT_CONFIRM requires a disk-boot target (DISK_SDCARD=1, DISK_EMMC=1, or an x86 FSP/AHCI target))
+    endif
+  endif
+  CFLAGS+=-D"DISK_BOOT_CONFIRM=1"
+endif
+
+# Optional golden slot for disk boot (src/update_disk.c): tried once after the
+# A/B attempts are spent, never written, exempt from anti-rollback. The
+# partition is BOOT_PART_GOLDEN (default 2), or BOOT_LABEL_GOLDEN / BOOT_FILE_GOLDEN
+# like the A/B slots.
+DISK_GOLDEN_SLOT ?= 0
+ifeq ($(DISK_GOLDEN_SLOT),1)
+  ifeq ($(WOLFBOOT_TARGET_BUILD),1)
+    ifeq (,$(findstring WOLFBOOT_UPDATE_DISK,$(CFLAGS)))
+      $(error DISK_GOLDEN_SLOT requires a disk-boot target (DISK_SDCARD=1, DISK_EMMC=1, or an x86 FSP/AHCI target))
+    endif
+  endif
+  CFLAGS+=-D"DISK_GOLDEN_SLOT=1"
+endif
+
+# Optional read-only filesystem support for disk boot (src/update_disk.c),
+# so a boot slot can name a file instead of requiring the signed image at
+# raw offset 0 of a partition. DISK_FS = fat32 | ext4 | both. Leaving it
+# unset keeps raw partition access completely unchanged.
+#
+# The WOLFBOOT_UPDATE_DISK test works because arch.mk is included before
+# this file (see the Makefile) and every disk-capable arch block puts that
+# define into CFLAGS. Gating here rather than in arch.mk keeps the knob in
+# one place instead of four.
+DISK_FS ?=
+ifneq ($(DISK_FS),)
+  ifeq (,$(filter fat32 ext4 both,$(DISK_FS)))
+    $(error DISK_FS must be one of: fat32, ext4, both)
+  endif
+  ifeq ($(WOLFBOOT_TARGET_BUILD),1)
+    ifeq (,$(findstring WOLFBOOT_UPDATE_DISK,$(CFLAGS)))
+      $(error DISK_FS requires a disk-boot target (DISK_SDCARD=1, DISK_EMMC=1, or an x86 FSP/AHCI target))
+    endif
+  endif
+  CFLAGS+=-D"WOLFBOOT_DISK_FS=1"
+  OBJS+= src/disk_fs.o
+  ifneq (,$(filter fat32 both,$(DISK_FS)))
+    CFLAGS+=-D"WOLFBOOT_FAT32=1"
+    OBJS+= src/fat32.o
+  endif
+  ifneq (,$(filter ext4 both,$(DISK_FS)))
+    CFLAGS+=-D"WOLFBOOT_EXT4=1"
+    OBJS+= src/ext4.o
+  endif
+  ifneq ($(WOLFBOOT_FS_CACHE_SIZE),)
+    CFLAGS+=-D"WOLFBOOT_FS_CACHE_SIZE=$(WOLFBOOT_FS_CACHE_SIZE)"
+  endif
+  ifneq ($(DEBUG_FS),)
+    CFLAGS+=-D"DEBUG_FS=$(DEBUG_FS)"
+  endif
+endif
+
+ifeq ($(UART_FLASH),1)
+  EXT_FLASH=1
+endif
+
+ifeq ($(ENCRYPT),1)
+  CFLAGS+=-D"EXT_ENCRYPTED=1"
+  ifeq ($(ENCRYPT_PKCS11),1)
+    CFLAGS+=-DENCRYPT_PKCS11 -D'ENCRYPT_PKCS11_PIN=$(ENCRYPT_PKCS11_PIN)'
+    ifeq ($(ENCRYPT_PKCS11_KEY_ID_SIZE),)
+      ENCRYPT_PKCS11_KEY_ID_SIZE=4
+    endif
+    CFLAGS+=-DENCRYPT_PKCS11_KEY_ID_SIZE=$(ENCRYPT_PKCS11_KEY_ID_SIZE)
+    ifeq ($(ENCRYPT_PKCS11_MECHANISM),)
+      # No mechanism defined; assume AES-CTR
+      CFLAGS+=-DENCRYPT_PKCS11_MECHANISM=0x00001086UL
+      CFLAGS+=-DENCRYPT_PKCS11_BLOCK_SIZE=16
+      CFLAGS+=-DENCRYPT_PKCS11_NONCE_SIZE=16
+    else
+      CFLAGS+=-DENCRYPT_PKCS11_MECHANISM=$(ENCRYPT_PKCS11_MECHANISM)
+      CFLAGS+=-DENCRYPT_PKCS11_BLOCK_SIZE=$(ENCRYPT_PKCS11_BLOCK_SIZE)
+      CFLAGS+=-DENCRYPT_PKCS11_NONCE_SIZE=$(ENCRYPT_PKCS11_NONCE_SIZE)
+    endif
+  else
+    ifeq ($(ENCRYPT_WITH_AES128),1)
+      CFLAGS+=-DWOLFSSL_AES_COUNTER -DWOLFSSL_AES_DIRECT
+      CFLAGS+=-DENCRYPT_WITH_AES128 -DWOLFSSL_AES_128
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/aes.o
+    else
+      ifeq ($(ENCRYPT_WITH_AES256),1)
+        CFLAGS+=-DWOLFSSL_AES_COUNTER -DWOLFSSL_AES_DIRECT
+        CFLAGS+=-DENCRYPT_WITH_AES256 -DWOLFSSL_AES_256
+        WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/aes.o
+      else
+        ENCRYPT_WITH_CHACHA=1
+        WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/chacha.o
+        CFLAGS+=-DENCRYPT_WITH_CHACHA -DHAVE_CHACHA
+      endif
+    endif
+  endif
+  ifeq ($(CUSTOM_ENCRYPT_KEY),1)
+    CFLAGS+=-D"CUSTOM_ENCRYPT_KEY"
+  endif
+endif
+
+ifeq ($(EXT_FLASH),1)
+  CFLAGS+= -D"EXT_FLASH=1" -D"PART_UPDATE_EXT=1"
+  ifeq ($(NO_SWAP_EXT),)
+    CFLAGS+= -D"PART_SWAP_EXT=1"
+  endif
+  ifeq ($(NO_XIP),1)
+    CFLAGS+=-D"PART_BOOT_EXT=1"
+  endif
+  ifeq ($(UART_FLASH),1)
+    CFLAGS+=-D"UART_FLASH=1"
+    OBJS+=src/uart_flash.o
+    WOLFCRYPT_OBJS+=hal/uart/uart_drv_$(UART_TARGET).o
+  endif
+endif
+
+ifeq ($(NO_XIP),1)
+  CFLAGS+=-D"NO_XIP"
+endif
+
+ifeq ($(DEBUG_UART),1)
+  ifeq ($(WOLFHAL),1)
+    # wolfHAL provides uart_write via hal/wolfhal.c; the wolfHAL board.mk
+    # pulls in the wolfHAL uart driver. Don't auto-add the legacy
+    # hal/uart/uart_drv_$(TARGET).o or its symbols would collide.
+    CFLAGS+=-DDEBUG_UART
+  else ifeq ($(strip $(UART_TARGET)),)
+  else
+    UART_DRV_OBJ:=hal/uart/uart_drv_$(UART_TARGET).o
+    # Test for the driver SOURCE, not the object: the object does not exist on a
+    # clean tree, so testing for it meant DEBUG_UART was silently dropped on the
+    # very build that was supposed to enable it.
+    ifneq ($(wildcard $(UART_DRV_OBJ:.o=.c)),)
+      CFLAGS+=-DDEBUG_UART
+      ifneq ($(findstring $(UART_DRV_OBJ),$(OBJS)),$(UART_DRV_OBJ))
+        OBJS+=$(UART_DRV_OBJ)
+      endif
+    endif
+  endif
+endif
+# Flash erase/write/read test at WOLFBOOT_PARTITION_UPDATE_ADDRESS.
+ifeq ($(TEST_FLASH),1)
+  CFLAGS+=-DTEST_FLASH
+endif
+ifeq ($(NO_QNX),1)
+  CFLAGS+=-D"NO_QNX"
+endif
+ifeq ($(SKIP_GIC_INIT),1)
+  CFLAGS+=-D"SKIP_GIC_INIT"
+endif
+
+# Boot Exception Level (mutually exclusive)
+ifeq ($(BOOT_EL1),1)
+  ifeq ($(BOOT_EL2),1)
+    $(error BOOT_EL1 and BOOT_EL2 are mutually exclusive. Choose one.)
+  endif
+  CFLAGS+=-D"BOOT_EL1"
+endif
+
+ifeq ($(BOOT_EL2),1)
+  CFLAGS+=-D"BOOT_EL2"
+endif
+
+ifeq ($(BOOT_BENCHMARK),1)
+  CFLAGS+=-D"BOOT_BENCHMARK"
+endif
+
+ifeq ($(ALLOW_DOWNGRADE),1)
+  $(warning ALLOW_DOWNGRADE=1 disables anti-rollback enforcement; signed older firmware images can replace newer ones)
+  CFLAGS+= -D"ALLOW_DOWNGRADE"
+endif
+
+# Raw (non-FIT) device tree authentication (see docs/Signing.md '--dts'). A
+# device tree bound to the image via HDR_DEVICE_TREE_DIGEST is always verified;
+# WOLFBOOT_REQUIRE_SIGNED_DTB additionally makes a missing digest a hard failure
+# (fail-closed) instead of a warning, once every raw-DTB payload is signed with
+# 'sign --dts'.
+ifeq ($(WOLFBOOT_REQUIRE_SIGNED_DTB),1)
+  $(warning WOLFBOOT_REQUIRE_SIGNED_DTB=1 makes wolfBoot panic on a raw device tree that carries no authenticated HDR_DEVICE_TREE_DIGEST; sign every raw DTB payload with 'sign --dts' first or the target will not boot)
+  CFLAGS+= -D"WOLFBOOT_REQUIRE_SIGNED_DTB"
+endif
+
+ifeq ($(WOLFBOOT_SKIP_BOOT_VERIFY),1)
+  ifeq ($(WOLFBOOT_SECURE_APP),1)
+    $(error WOLFBOOT_SKIP_BOOT_VERIFY=1 is incompatible with the authenticated secure-app handoff)
+  endif
+  ifneq ($(WOLFBOOT_SELF_HEADER),1)
+    $(error WOLFBOOT_SKIP_BOOT_VERIFY=1 requires WOLFBOOT_SELF_HEADER=1)
+  endif
+  ifneq ($(SELF_UPDATE_MONOLITHIC),1)
+    $(error WOLFBOOT_SKIP_BOOT_VERIFY=1 requires WOLFBOOT_SELF_UPDATE_MONOLITHIC (set SELF_UPDATE_MONOLITHIC=1))
+  endif
+  $(warning WOLFBOOT_SKIP_BOOT_VERIFY=1 disables ALL boot-time firmware signature and integrity verification; only safe when an external verifier authenticates the full monolithic payload before boot. Do not use in production.)
+  CFLAGS+=-D"WOLFBOOT_SKIP_BOOT_VERIFY"
+endif
+
+ifeq ($(NVM_FLASH_WRITEONCE),1)
+  CFLAGS+= -D"NVM_FLASH_WRITEONCE"
+endif
+
+ifeq ($(DISABLE_BACKUP),1)
+  $(warning DISABLE_BACKUP=1 disables power-fail-safe updates; losing power during an update can leave BOOT partially written and unrecoverable)
+  CFLAGS+= -D"DISABLE_BACKUP"
+  WOLFBOOT_PARTITION_SWAP_ADDRESS?=0
+endif
+
+DEBUG_SYMBOLS?=0
+ifeq ($(DEBUG),1)
+  CFLAGS+=-O0 -D"DEBUG"
+  DEBUG_SYMBOLS=1
+else
+  ifeq ($(OPTIMIZATION_LEVEL),)
+    CFLAGS+=-Os
+  else
+    CFLAGS+=-O$(OPTIMIZATION_LEVEL)
+  endif
+endif
+
+# allow elf inclusion of debug symbols even with optimizations enabled
+# make DEBUG_SYMBOLS=1
+ifeq ($(DEBUG_SYMBOLS),1)
+  CFLAGS+=-g -DDEBUG_SYMBOLS
+  ifeq ($(USE_GCC),1)
+    CFLAGS+=-ggdb3
+  else ifneq ($(ARCH),AURIX)
+    ifneq ($(USE_CLANG),1)
+    # -gstabs was removed in GCC 12; -gdwarf-4 works on old and new GCC
+    CFLAGS+=-gdwarf-4
+    endif
+  endif
+endif
+
+
+Q?=@
+ifeq ($(V),1)
+  Q=
+endif
+
+ifeq ($(NO_MPU),1)
+  CFLAGS+=-D"WOLFBOOT_NO_MPU"
+endif
+
+ifeq ($(VTOR),0)
+  CFLAGS+=-D"NO_VTOR"
+endif
+
+ifeq ($(PKA),1)
+  OBJS += $(PKA_EXTRA_OBJS)
+  CFLAGS+=$(PKA_EXTRA_CFLAGS)
+endif
+
+ifneq ($(WOLFBOOT_VERSION),0)
+  ifneq ($(WOLFBOOT_VERSION),)
+    CFLAGS+=-DWOLFBOOT_VERSION=$(WOLFBOOT_VERSION)
+  endif
+endif
+
+ifeq ($(DELTA_UPDATES),1)
+  OBJS += src/delta.o
+  CFLAGS+=-DDELTA_UPDATES
+  ifneq ($(DELTA_BLOCK_SIZE),)
+    CFLAGS+=-DDELTA_BLOCK_SIZE=$(DELTA_BLOCK_SIZE)
+  endif
+endif
+
+# GZIP=1 enables native gzip decompression of FIT subimages
+# (RFC 1951 + RFC 1952). Enabled by default in FIT-using example configs.
+GZIP ?= 0
+GZIP_SMALL ?= 0
+ifeq ($(GZIP),1)
+  OBJS += src/gzip.o
+  CFLAGS+=-DWOLFBOOT_GZIP
+  # GZIP_SMALL=1 selects the bit-serial Huffman decoder in src/gzip.c: a
+  # few KB less code and no static tables, at a fraction of the default
+  # table-driven decoder's rate.
+  ifeq ($(GZIP_SMALL),1)
+    CFLAGS+=-DWOLFBOOT_GZIP_SMALL
+  endif
+endif
+
+# FIT_RAMDISK=1 enables FIT ramdisk (initramfs) extraction and DTB
+# /chosen/linux,initrd-{start,end} fixup. Compressed (gzip) ramdisks
+# decompress through the same path when GZIP=1.
+FIT_RAMDISK ?= 0
+ifeq ($(FIT_RAMDISK),1)
+  CFLAGS+=-DWOLFBOOT_FIT_RAMDISK
+endif
+
+# FPGA_BITSTREAM=1 enables loading an "fpga" sub-image from a FIT and
+# programming the PL before booting (Xilinx ZynqMP/Zynq-7000; Versal is
+# stubbed pending a PLM Load-PDI path). Off by default.
+FPGA_BITSTREAM ?= 0
+ifeq ($(FPGA_BITSTREAM),1)
+  CFLAGS+=-DWOLFBOOT_FPGA_BITSTREAM
+endif
+# DDR staging address for the (decompressed) FPGA bitstream. The fpga
+# sub-image typically has no `load` property and is gzip-compressed, so
+# it is decompressed to this address before the PL is programmed. 0 (the
+# default) means "honor the FIT's own `load` property instead". Pick a
+# region clear of the FIT staging area (WOLFBOOT_LOAD_ADDRESS) and the
+# kernel/DTB/ramdisk load addresses.
+WOLFBOOT_LOAD_FPGA_ADDRESS ?= 0
+# FPGA_NONFATAL=1 downgrades a failed PL load from fatal (panic) to a
+# logged warning that continues the boot.
+FPGA_NONFATAL ?= 0
+ifeq ($(FPGA_NONFATAL),1)
+  $(warning FPGA_NONFATAL=1 continues booting when the FPGA bitstream fails to load; the device may run without security-relevant programmable logic)
+  CFLAGS+=-DWOLFBOOT_FPGA_NONFATAL
+endif
+# FIT_CONFIG_SELECT=1 lets the target pick a per-board FIT configuration
+# at runtime (hal_fit_config_name) instead of always booting the FIT's
+# `default` config - mirrors U-Boot's `bootm <addr>#conf-<board>`.
+FIT_CONFIG_SELECT ?= 0
+ifeq ($(FIT_CONFIG_SELECT),1)
+  CFLAGS+=-DWOLFBOOT_FIT_CONFIG_SELECT
+endif
+
+ifeq ($(ARMORED),1)
+  CFLAGS+=-DWOLFBOOT_ARMORED
+endif
+
+ifeq ($(WOLFBOOT_IMG_HASH_ONESHOT),1)
+  CFLAGS+=-DWOLFBOOT_IMG_HASH_ONESHOT
+endif
+
+ifeq ($(WOLFBOOT_HUGE_STACK),1)
+  CFLAGS+=-DWOLFBOOT_HUGE_STACK
+endif
+
+ifeq ($(WOLFCRYPT_TZ_PKCS11),1)
+  ifeq ($(WOLFCRYPT_TZ_PSA),1)
+    $(error WOLFCRYPT_TZ_PKCS11 and WOLFCRYPT_TZ_PSA are mutually exclusive)
+  endif
+  ifeq ($(WOLFCRYPT_TZ_FWTPM),1)
+    $(error WOLFCRYPT_TZ_PKCS11 and WOLFCRYPT_TZ_FWTPM are mutually exclusive)
+  endif
+  ifeq ($(WOLFCRYPT_TZ_WOLFHSM),1)
+    $(error WOLFCRYPT_TZ_PKCS11 and WOLFCRYPT_TZ_WOLFHSM are mutually exclusive)
+  endif
+endif
+
+ifeq ($(WOLFCRYPT_TZ_PSA),1)
+  ifeq ($(WOLFCRYPT_TZ_FWTPM),1)
+    $(error WOLFCRYPT_TZ_PSA and WOLFCRYPT_TZ_FWTPM are mutually exclusive)
+  endif
+  ifeq ($(WOLFCRYPT_TZ_WOLFHSM),1)
+    $(error WOLFCRYPT_TZ_PSA and WOLFCRYPT_TZ_WOLFHSM are mutually exclusive)
+  endif
+endif
+
+ifeq ($(WOLFCRYPT_TZ_FWTPM),1)
+  ifeq ($(WOLFCRYPT_TZ_WOLFHSM),1)
+    $(error WOLFCRYPT_TZ_FWTPM and WOLFCRYPT_TZ_WOLFHSM are mutually exclusive)
+  endif
+endif
+
+ifeq ($(WOLFBOOT_DICE_HW),1)
+  ifneq ($(WOLFCRYPT_TZ_PSA),1)
+    $(error WOLFBOOT_DICE_HW requires WOLFCRYPT_TZ_PSA=1)
+  endif
+endif
+
+ifeq ($(PKCS11_STORE_STATS),1)
+  CFLAGS+=-DPKCS11_STORE_STATS
+endif
+
+ifeq ($(WOLFCRYPT_TZ_PKCS11),1)
+  CFLAGS+=-DSECURE_PKCS11
+  CFLAGS+=-DWOLFPKCS11_USER_SETTINGS
+  CFLAGS+=-DWOLFSSL_PKCS11_RW_TOKENS
+  CFLAGS+=-DCK_CALLABLE="__attribute__((cmse_nonsecure_entry))"
+  CFLAGS+=-I$(WOLFBOOT_LIB_WOLFPKCS11)
+  CFLAGS+=-DWP11_HASH_PIN_COST=3
+  ifeq ($(USE_CLANG),1)
+    CLANG_MULTILIB_FLAGS:=$(filter -mthumb -mlittle-endian,$(LDFLAGS)) $(filter -mcpu=%,$(CFLAGS))
+    LIBS+=$(shell $(CLANG_GCC_NAME) $(CLANG_MULTILIB_FLAGS) -print-file-name=libc.a)
+    LIBS+=$(shell $(CLANG_GCC_NAME) $(CLANG_MULTILIB_FLAGS) -print-libgcc-file-name)
+  else
+    LDFLAGS+=--specs=nano.specs
+  endif
+  WOLFCRYPT_OBJS+=src/store_sbrk.o
+  WOLFCRYPT_OBJS+=src/pkcs11_store.o
+  WOLFCRYPT_OBJS+=src/pkcs11_callable.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/pwdbased.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/hmac.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/dh.o
+  ifeq ($(findstring random.o,$(WOLFCRYPT_OBJS)),)
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/random.o
+  endif
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFPKCS11)/src/crypto.o \
+        $(WOLFBOOT_LIB_WOLFPKCS11)/src/internal.o \
+        $(WOLFBOOT_LIB_WOLFPKCS11)/src/slot.o \
+        $(WOLFBOOT_LIB_WOLFPKCS11)/src/wolfpkcs11.o
+  STACK_USAGE=16688
+  ifeq ($(ENCRYPT_WITH_AES128)$(ENCRYPT_WITH_AES256),)
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/aes.o
+  endif
+  ifeq ($(findstring RSA,$(SIGN)),)
+  ifeq ($(findstring RSA,$(SIGN_SECONDARY)),)
+      WOLFCRYPT_OBJS+=$(RSA_OBJS)
+  endif
+  endif
+  ifeq ($(findstring ECC,$(SIGN)),)
+  ifeq ($(findstring ECC,$(SIGN_SECONDARY)),)
+      WOLFCRYPT_OBJS+=$(ECC_OBJS)
+  endif
+  endif
+  ifeq ($(findstring ECC,$(SIGN)),)
+  ifeq ($(findstring ECC,$(SIGN_SECONDARY)),)
+  ifeq ($(findstring RSA,$(SIGN)),)
+  ifeq ($(findstring RSA,$(SIGN_SECONDARY)),)
+	  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  endif
+  endif
+  endif
+endif
+
+ifeq ($(WOLFCRYPT_TZ_PSA),1)
+  CFLAGS+=-DWOLFCRYPT_TZ_PSA
+  CFLAGS+=-DWOLFCRYPT_SECURE_MODE
+  ifeq ($(WOLFBOOT_DICE_HW),1)
+    CFLAGS+=-DWOLFBOOT_DICE_HW
+  endif
+  CFLAGS+=-DWOLFSSL_PSA_ENGINE
+  CFLAGS+=-DWC_ALLOW_ECC_ZERO_HASH
+  CFLAGS+=-DWOLFSSL_AES_TOUCH_LINES
+  CFLAGS+=-DWOLFPSA_CUSTOM_STORE
+  CFLAGS+=-DNO_DES3 -DNO_DES3_TLS_SUITES
+  CFLAGS+=-I$(WOLFBOOT_LIB_WOLFCOSE)/include
+  CFLAGS+=-DWOLFCOSE_LEAN -DWOLFCOSE_ENABLE_EXT_SIGN
+  WOLFPSA_CFLAGS+=-I$(WOLFBOOT_LIB_WOLFPSA)
+  WOLFPSA_CFLAGS+=-I$(WOLFBOOT_LIB_WOLFPSA)/wolfpsa
+  ifeq ($(USE_CLANG),1)
+    CLANG_MULTILIB_FLAGS:=$(filter -mthumb -mlittle-endian,$(LDFLAGS)) $(filter -mcpu=%,$(CFLAGS))
+    LIBS+=$(shell $(CLANG_GCC_NAME) $(CLANG_MULTILIB_FLAGS) -print-file-name=libc.a)
+    LIBS+=$(shell $(CLANG_GCC_NAME) $(CLANG_MULTILIB_FLAGS) -print-libgcc-file-name)
+  else
+    LDFLAGS+=--specs=nano.specs
+  endif
+  WOLFCRYPT_OBJS+=src/store_sbrk.o
+  WOLFCRYPT_OBJS+=src/psa_store.o
+  WOLFCRYPT_OBJS+=src/arm_tee_psa_veneer.o
+  WOLFCRYPT_OBJS+=src/arm_tee_psa_ipc.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_cbor.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_util.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_alg.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_ecc.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_hdr.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_key.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_struct.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_recipient.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_sign1.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_sign.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_countersign.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_encrypt0.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_mac0.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_encrypt.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFCOSE)/src/wolfcose_mac.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/pwdbased.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/hmac.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/dh.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/chacha.o
+  ifeq ($(findstring random.o,$(WOLFCRYPT_OBJS)),)
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/random.o
+  endif
+  WOLFPSA_SRCS := $(filter-out $(WOLFBOOT_LIB_WOLFPSA)/src/psa_store_posix.c \
+      $(WOLFBOOT_LIB_WOLFPSA)/src/psa_store_zephyr.c, \
+    $(wildcard $(WOLFBOOT_LIB_WOLFPSA)/src/*.c))
+  WOLFPSA_OBJS := $(patsubst %.c,%.o,$(WOLFPSA_SRCS))
+  WOLFCRYPT_OBJS+=$(WOLFPSA_OBJS)
+  STACK_USAGE=16688
+  ifneq ($(ENCRYPT),1)
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/aes.o
+  endif
+  ifeq ($(findstring RSA,$(SIGN)),)
+  ifeq ($(findstring RSA,$(SIGN_SECONDARY)),)
+      WOLFCRYPT_OBJS+=$(RSA_OBJS)
+  endif
+  endif
+  ifeq ($(findstring ECC,$(SIGN)),)
+  ifeq ($(findstring ECC,$(SIGN_SECONDARY)),)
+      WOLFCRYPT_OBJS+=$(ECC_OBJS)
+  endif
+  endif
+  ifeq ($(findstring ECC,$(SIGN)),)
+  ifeq ($(findstring ECC,$(SIGN_SECONDARY)),)
+  ifeq ($(findstring RSA,$(SIGN)),)
+  ifeq ($(findstring RSA,$(SIGN_SECONDARY)),)
+	  WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  endif
+  endif
+  endif
+endif
+
+ifeq ($(WOLFCRYPT_TZ_FWTPM),1)
+  CFLAGS+=-DWOLFBOOT_TZ_FWTPM
+  CFLAGS+=-DWOLFCRYPT_SECURE_MODE
+  CFLAGS+=-DWOLFTPM_FWTPM
+  CFLAGS+=-DFWTPM_NO_NV
+  CFLAGS+=-DWC_RSA_PSS
+  CFLAGS+=-DWOLFSSL_PSS_SALT_LEN_DISCOVER
+  CFLAGS+=-DFWTPM_MAX_COMMAND_SIZE=4096
+  # NV is disabled here; the default 16x2KB NV index slots are dead weight that
+  # pushes the fwTPM context into the secure stack on the 128KB STM32H5 RAM.
+  CFLAGS+=-DFWTPM_MAX_NV_INDICES=2
+  CFLAGS+=-DFWTPM_MAX_NV_DATA=512
+  CFLAGS+=-I$(WOLFBOOT_LIB_WOLFTPM)
+  ifeq ($(USE_CLANG),1)
+    CLANG_MULTILIB_FLAGS:=$(filter -mthumb -mlittle-endian,$(LDFLAGS)) $(filter -mcpu=%,$(CFLAGS))
+    LIBS+=$(shell $(CLANG_GCC_NAME) $(CLANG_MULTILIB_FLAGS) -print-file-name=libc.a)
+    LIBS+=$(shell $(CLANG_GCC_NAME) $(CLANG_MULTILIB_FLAGS) -print-libgcc-file-name)
+  else
+    LDFLAGS+=--specs=nano.specs
+  endif
+  WOLFCRYPT_OBJS+=src/store_sbrk.o
+  WOLFCRYPT_OBJS+=src/fwtpm_callable.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/src/fwtpm/fwtpm.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/src/fwtpm/fwtpm_command.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/src/fwtpm/fwtpm_crypto.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/src/fwtpm/fwtpm_nv.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_util.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_packet.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_crypto.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_param_enc.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/hmac.o
+  ifneq ($(SIGN),ED25519)
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha512.o
+  endif
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/wc_encrypt.o
+  ifeq ($(ENCRYPT_WITH_AES128)$(ENCRYPT_WITH_AES256),)
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/aes.o
+  endif
+  WOLFCRYPT_OBJS+=$(RSA_OBJS)
+  ifeq ($(findstring ECC,$(SIGN)),)
+  ifeq ($(findstring ECC,$(SIGN_SECONDARY)),)
+      WOLFCRYPT_OBJS+=$(ECC_OBJS)
+      WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  endif
+  STACK_USAGE=20000
+endif
+
+ifeq ($(WOLFCRYPT_TZ_WOLFHSM),1)
+  CFLAGS+=-DWOLFCRYPT_TZ_WOLFHSM
+  CFLAGS+=-DWOLFCRYPT_SECURE_MODE
+  CFLAGS+=-DWOLFHSM_CFG_ENABLE_SERVER
+  CFLAGS+=-DWOLFHSM_CFG_COMM_DATA_LEN=1280
+  CFLAGS+=-DWOLFHSM_CFG_PORT_ARMV8M_TZ_NSC
+  CFLAGS+=-DWOLFHSM_CFG_NO_SYS_TIME
+  CFLAGS+=-I"$(WOLFBOOT_LIB_WOLFHSM)"
+  CFLAGS+=-I"$(WOLFBOOT_LIB_WOLFHSM)/port/armv8m-tz"
+  ifeq ($(USE_CLANG),1)
+    CLANG_MULTILIB_FLAGS:=$(filter -mthumb -mlittle-endian,$(LDFLAGS)) $(filter -mcpu=%,$(CFLAGS))
+    LIBS+=$(shell $(CLANG_GCC_NAME) $(CLANG_MULTILIB_FLAGS) -print-file-name=libc.a)
+    LIBS+=$(shell $(CLANG_GCC_NAME) $(CLANG_MULTILIB_FLAGS) -print-libgcc-file-name)
+  else
+    LDFLAGS+=--specs=nano.specs
+  endif
+  WOLFCRYPT_OBJS+=src/store_sbrk.o
+  WOLFCRYPT_OBJS+=src/wolfhsm_callable.o
+  WOLFCRYPT_OBJS+=src/wolfhsm_flash_hal.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/cryptocb.o
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/hmac.o
+  ifneq ($(SIGN),ED25519)
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha512.o
+  endif
+  ifneq ($(HASH),SHA3)
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha3.o
+  endif
+  WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/wc_encrypt.o
+  ifeq ($(ENCRYPT_WITH_AES128)$(ENCRYPT_WITH_AES256),)
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/aes.o
+  endif
+  WOLFCRYPT_OBJS+=$(RSA_OBJS)
+  ifeq ($(findstring ECC,$(SIGN)),)
+  ifeq ($(findstring ECC,$(SIGN_SECONDARY)),)
+      WOLFCRYPT_OBJS+=$(ECC_OBJS)
+      WOLFCRYPT_OBJS+=$(MATH_OBJS)
+  endif
+  endif
+  WOLFHSM_OBJS+=$(WOLFHSM_SERVER_OBJS)
+  WOLFHSM_OBJS+=$(WOLFBOOT_LIB_WOLFHSM)/port/armv8m-tz/wh_transport_nsc.o
+  STACK_USAGE=20000
+endif
+
+OBJS+=$(PUBLIC_KEY_OBJS)
+ifneq ($(STAGE1),1)
+  OBJS+=$(UPDATE_OBJS)
+endif
+
+ifeq ($(WOLFTPM),1)
+  OBJS+=\
+    ./src/tpm.o \
+    $(WOLFBOOT_LIB_WOLFTPM)/src/tpm2.o \
+    $(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_packet.o \
+    $(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_tis.o \
+    $(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_wrap.o \
+    $(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_crypto.o \
+    $(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_util.o \
+    $(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_param_enc.o
+  CFLAGS+=-I$(WOLFBOOT_LIB_WOLFTPM)
+  CFLAGS+=-D"WOLFBOOT_TPM"
+  CFLAGS+=-D"WOLFTPM_SMALL_STACK"
+  # The TPM transport is chosen independently of SPI flash, because a board
+  # can carry SPI flash and still reach its TPM over I2C. WOLFTPM_I2C is what
+  # selects the TCG PTP I2C register map inside wolfTPM; without it the
+  # transport would use the SPI offsets.
+  ifeq ($(WOLFBOOT_TPM_I2C),1)
+    CFLAGS+=-DWOLFBOOT_TPM_I2C -DWOLFTPM_I2C -DWOLFTPM_ADV_IO
+    # The bit-banged back-end needs only two open-drain GPIOs, so it is the
+    # fallback where the controller is unavailable or not worth configuring.
+    ifeq ($(I2C_BITBANG),1)
+      CFLAGS+=-DI2C_BITBANG
+      WOLFCRYPT_OBJS+=hal/i2c/i2c_drv_bitbang.o
+      WOLFCRYPT_OBJS+=hal/i2c/i2c_bitbang_$(I2C_TARGET).o
+    else
+      WOLFCRYPT_OBJS+=hal/i2c/i2c_drv_$(I2C_TARGET).o
+    endif
+  endif
+  ifneq ($(SPI_FLASH),1)
+    # don't use spi if we're using simulator, unless an explicit transport was
+    # asked for: WOLFBOOT_TPM_I2C=1 on the simulator builds the I2C transport
+    # against the stub back-end, which is how that code path is build-tested.
+    ifeq ($(TARGET),sim)
+      ifneq ($(WOLFBOOT_TPM_I2C),1)
+        SIM_TPM=1
+      endif
+    endif
+    ifeq ($(SIM_TPM),1)
+      CFLAGS+=-DWOLFTPM_SWTPM -DTPM_TIMEOUT_TRIES=0 -DHAVE_NETDB_H -DHAVE_UNISTD_H
+      OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/src/tpm2_swtpm.o
+    else ifneq ($(WOLFBOOT_TPM_I2C),1)
+      # Use memory-mapped WOLFTPM on x86-64
+        ifeq ($(ARCH),x86_64)
+          CFLAGS+=-DWOLFTPM_MMIO -DWOLFTPM_EXAMPLE_HAL -DWOLFTPM_INCLUDE_IO_FILE
+          OBJS+=$(WOLFBOOT_LIB_WOLFTPM)/hal/tpm_io_mmio.o
+        # By default, on other architectures, provide SPI driver
+        else
+          WOLFCRYPT_OBJS+=hal/spi/spi_drv_$(SPI_TARGET).o
+        endif
+    endif
+  endif
+  ifneq ($(WOLFCRYPT_TZ_PKCS11),1)
+  ifneq ($(WOLFCRYPT_TZ_PSA),1)
+    ifneq ($(ENCRYPT),1)
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/aes.o
+    endif
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/hmac.o
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/random.o
+  endif
+  endif
+  ifeq ($(DEBUG),1)
+    CFLAGS+=-DWOLFBOOT_DEBUG_TPM=1
+  endif
+endif
+
+## Hash settings
+ifeq ($(HASH),SHA256)
+  CFLAGS+=-D"WOLFBOOT_HASH_SHA256"
+endif
+
+ifeq ($(HASH),SHA384)
+  CFLAGS+=-D"WOLFBOOT_HASH_SHA384"
+  SIGN_OPTIONS+=--sha384
+  ifneq ($(SIGN),ED25519)
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha512.o
+  endif
+endif
+
+ifeq ($(WOLFBOOT_NO_PARTITIONS),1)
+  CFLAGS+=-D"WOLFBOOT_NO_PARTITIONS"
+endif
+
+ifeq ($(HASH),SHA3)
+  ifeq ($(HASH_HAL),)
+    WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha3.o
+  endif
+  CFLAGS+=-D"WOLFBOOT_HASH_SHA3_384"
+  SIGN_OPTIONS+=--sha3
+endif
+
+CFLAGS+=-DIMAGE_HEADER_SIZE=$(IMAGE_HEADER_SIZE)
+OBJS+=$(SECURE_OBJS)
+
+# check if both encryption and self update are on
+#
+ifeq ($(RAM_CODE),1)
+  ifeq ($(ENCRYPT),1)
+    ifeq ($(ENCRYPT_WITH_CHACHA),1)
+      ifneq ($(WOLFHAL),1)
+        LSCRIPT_IN=hal/$(TARGET)_chacha_ram.ld
+      endif
+    endif
+  endif
+  ifeq ($(ARCH),ARM)
+    CFLAGS+=-mlong-calls
+  endif
+endif
+
+# Support external encryption cache
+#
+ifeq ($(ENCRYPT),1)
+  ifeq ($(ENCRYPT_CACHE),1)
+	CFLAGS+=-D"WOLFBOOT_ENCRYPT_CACHE=$(ENCRYPT_CACHE)"
+  endif
+endif
+
+# support for elf32 or elf64 loader
+ifeq ($(ELF),1)
+  CFLAGS+=-DWOLFBOOT_ELF
+  OBJS += src/elf.o
+
+  ifneq ($(DEBUG_ELF),)
+    CFLAGS+=-DDEBUG_ELF=$(DEBUG_ELF)
+  endif
+  ifeq ($(ELF_FLASH_SCATTER),1)
+    CFLAGS+=-D"WOLFBOOT_ELF_FLASH_SCATTER=1"
+  endif
+
+endif
+
+ifeq ($(MULTIBOOT2),1)
+  CFLAGS+=-DWOLFBOOT_MULTIBOOT2
+  OBJS += src/multiboot.o
+endif
+
+ifeq ($(LINUX_PAYLOAD),1)
+  CFLAGS+=-DWOLFBOOT_LINUX_PAYLOAD
+  ifeq ($(ARCH),x86_64)
+    OBJS+=src/x86/linux_loader.o
+  endif
+endif
+
+ifeq ($(64BIT),1)
+  CFLAGS+=-DWOLFBOOT_64BIT
+endif
+
+ifeq ($(WOLFBOOT_UNIVERSAL_KEYSTORE),1)
+  CFLAGS+=-DWOLFBOOT_UNIVERSAL_KEYSTORE
+endif
+
+ifeq ($(DISK_LOCK),1)
+  CFLAGS+=-DWOLFBOOT_ATA_DISK_LOCK
+  ifneq ($(DISK_LOCK_PASSWORD),)
+    CFLAGS+=-DWOLFBOOT_ATA_DISK_LOCK_PASSWORD=\"$(DISK_LOCK_PASSWORD)\"
+  endif
+endif
+
+ifeq ($(FSP), 1)
+  X86_FSP_OPTIONS := \
+    X86_UART_BASE \
+    X86_UART_REG_WIDTH \
+    X86_UART_MMIO \
+    PCH_HAS_PCR \
+    PCI_USE_ECAM \
+    PCH_PCR_BASE \
+    PCI_ECAM_BASE \
+    WOLFBOOT_LOAD_BASE \
+    FSP_S_LOAD_BASE
+
+    # set CFLAGS defines for each x86_fsp option
+    $(foreach option,$(X86_FSP_OPTIONS),$(if $($(option)), $(eval CFLAGS += -D$(option)=$($(option)))))
+endif
+
+ifeq ($(FLASH_MULTI_SECTOR_ERASE),1)
+    CFLAGS+=-DWOLFBOOT_FLASH_MULTI_SECTOR_ERASE
+endif
+
+# Per-hart secondary stack size: single source of truth shared by the
+# startup asm (via this -D) and the linker script (via @STACK_SIZE_PER_HART@
+# substitution in the LSCRIPT rule).  Set in the target .config; defaults to
+# 0 (no secondary park/wake stacks).  The concept (and the consuming startup
+# asm) is RISC-V only, so gate the -D to RISC-V; the default is kept
+# unconditional because the LSCRIPT sed always needs a value to substitute.
+STACK_SIZE_PER_HART ?= 0
+ifneq (,$(filter RISCV RISCV64,$(ARCH)))
+  CFLAGS+=-DSTACK_SIZE_PER_HART=$(STACK_SIZE_PER_HART)
+endif
+
+CFLAGS+=$(CFLAGS_EXTRA)
+LDFLAGS+=$(LDFLAGS_EXTRA)
+OBJS+=$(OBJS_EXTRA)
+
+# The authenticated STM32H5 ECC256 secure-app path retains certificate parsing.
+# Do not lower the larger stack thresholds selected by other signature schemes.
+ifeq ($(WOLFBOOT_SECURE_APP),1)
+  ifeq ($(TARGET),stm32h5)
+    ifeq ($(SIGN),ECC256)
+      STACK_USAGE=16688
+    endif
+  endif
+endif
+
+ifeq ($(USE_GCC_HEADLESS),1)
+  ifeq ($(USE_GCC),1)
+    ifneq ($(USE_CLANG),1)
+      ifneq ($(ARCH),RENESAS_RX)
+        ifneq ($(ARCH),AURIX)
+          CFLAGS+="-Wstack-usage=$(STACK_USAGE)"
+        endif
+      endif
+    endif
+  endif
+endif
+
+ifeq ($(SIGN_ALG),)
+  SIGN_ALG=$(SIGN)
+endif
+
+ifneq ($(KEYVAULT_OBJ_SIZE),)
+  CFLAGS+=-DKEYVAULT_OBJ_SIZE=$(KEYVAULT_OBJ_SIZE)
+endif
+
+ifneq ($(KEYVAULT_MAX_ITEMS),)
+  CFLAGS+=-DKEYVAULT_MAX_ITEMS=$(KEYVAULT_MAX_ITEMS)
+endif
+
+# Support for using a custom partition ID
+ifneq ($(WOLFBOOT_PART_ID),)
+  CFLAGS+=-DHDR_IMG_TYPE_APP=$(WOLFBOOT_PART_ID)
+  SIGN_OPTIONS+=--id $(WOLFBOOT_PART_ID)
+endif
+
+# Simulator crypto callback test option
+ifeq ($(ARCH),sim)
+ifeq ($(WOLFBOOT_TEST_SIM_CRYPTOCB),1)
+  CFLAGS += -DWOLFBOOT_TEST_SIM_CRYPTOCB
+  CFLAGS += -DWOLF_CRYPTO_CB
+  CFLAGS += -DWOLFBOOT_DEVID_HASH=0xCB
+  CFLAGS += -DWOLFBOOT_DEVID_PUBKEY=0xCB
+  CFLAGS += -DWOLFBOOT_DEVID_CRYPT=0xCB
+  WOLFCRYPT_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/cryptocb.o
+endif
+endif
+
+# Size of the wolfHSM comm data payload, shared by the client and server blocks
+# below. The default is sized for certificate chains (the whole DER chain is
+# shipped to the HSM in a single message) and for ML-DSA keys/signatures.
+#
+# Targets whose transport slot is smaller MUST override this in their .config:
+# e.g. PIC32CZ's shared-memory slot is 4096 B, of which the transport CSR takes
+# 8 B and the comm header another 8 B, so 4080 is a hard ceiling -- overrunning
+# it silently corrupts the slot rather than failing the build. The value must
+# also match the wolfHSM server's own build, or the two disagree on the layout.
+WOLFHSM_CFG_COMM_DATA_LEN ?= 5000
+
+# Maximum trusted-root count for wolfHSM cert-chain verification. Part of the
+# client<->server wire format, so every wolfHSM build in the system (wolfBoot
+# client or server, and any separately built HSM server firmware) must use
+# the same value.
+WOLFHSM_CFG_CERT_MAX_VERIFY_ROOTS ?= 8
+
+# wolfHSM client options
+ifeq ($(WOLFHSM_CLIENT),1)
+  WOLFCRYPT_OBJS += \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/cryptocb.o
+
+  ifeq ($(SIGN),ML_DSA)
+    WOLFCRYPT_OBJS += $(MATH_OBJS)
+    # ML-DSA asn.c decode/encode requires mp_xxx functions
+    WOLFCRYPT_OBJS += \
+        $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/random.o
+  endif
+
+  WOLFHSM_OBJS += $(WOLFHSM_CLIENT_OBJS)
+  #includes
+  CFLAGS += -I"$(WOLFBOOT_LIB_WOLFHSM)"
+  # defines
+  CFLAGS += -DWOLFBOOT_ENABLE_WOLFHSM_CLIENT -DWOLFHSM_CFG_ENABLE_CLIENT
+  # HAL crypto devId abstraction for wolfHSM client
+  CFLAGS += -DWOLFBOOT_DEVID_HASH=hsmDevIdHash
+  CFLAGS += -DWOLFBOOT_DEVID_PUBKEY=hsmDevIdPubKey
+  ifeq ($(ENCRYPT),1)
+    CFLAGS += -DWOLFBOOT_DEVID_CRYPT=hsmDevIdCrypt
+  endif
+  # Make sure we export generated public keys so they can be used to load into
+  # HSM out-of-band
+  KEYGEN_OPTIONS += --exportpubkey --der
+
+  # wolfHSM clients always use HSM-resident public keys, referenced by key ID or
+  # authenticated via a certificate chain. Public keys baked into a local
+  # keystore.c are not supported.
+  KEYGEN_OPTIONS += --nolocalkeys
+  CFLAGS += -DWOLFHSM_CFG_COMM_DATA_LEN=$(WOLFHSM_CFG_COMM_DATA_LEN)
+  CFLAGS += -DWOLFHSM_CFG_CERT_MAX_VERIFY_ROOTS=$(WOLFHSM_CFG_CERT_MAX_VERIFY_ROOTS)
+
+  # wolfHSM client ID presented to the HSM server during the connection
+  # handshake. Single value shared by all targets; defaults to 1. Override in the
+  # .config or on the make command line. This MUST match the client/user ID the
+  # server provisions the wolfBoot public key under -- e.g. the whnvmtool
+  # 'key <clientId> ...' field (tools/scripts/tc3xx/*.nvminit) or the example
+  # POSIX server's '--client <id>' argument.
+  WOLFHSM_CLIENT_ID ?= 1
+  CFLAGS += -DWOLFBOOT_WOLFHSM_CLIENT_ID=$(WOLFHSM_CLIENT_ID)
+
+  # Ensure wolfHSM is configured to use certificate manager if we are
+  # doing cert chain verification
+  ifneq ($(CERT_CHAIN_VERIFY),)
+    WOLFHSM_OBJS += \
+      $(WOLFBOOT_LIB_WOLFHSM)/src/wh_client_cert.o \
+      $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_cert.o
+    CFLAGS += -DWOLFHSM_CFG_CERTIFICATE_MANAGER
+  endif
+endif
+
+# wolfHSM server options
+ifeq ($(WOLFHSM_SERVER),1)
+  # Currently, cert chain auth is the only supported auth mechanism for wolfHSM
+  # server mode
+  ifeq ($(CERT_CHAIN_VERIFY),)
+    $(error WOLFHSM_SERVER=1 requires CERT_CHAIN_VERIFY=1: wolfHSM server mode \
+            only supports certificate-chain authentication)
+  endif
+
+  WOLFCRYPT_OBJS += \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/cryptocb.o \
+    $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/random.o
+  ifeq ($(SIGN),ML_DSA)
+    WOLFCRYPT_OBJS += $(MATH_OBJS)
+    # Large enough to handle the largest ML-DSA key/signature
+    CFLAGS += -DWOLFHSM_CFG_COMM_DATA_LEN=$(WOLFHSM_CFG_COMM_DATA_LEN)
+  endif
+
+  WOLFHSM_OBJS += $(WOLFHSM_SERVER_OBJS)
+
+  #includes
+  CFLAGS += -I"$(WOLFBOOT_LIB_WOLFHSM)"
+  # defines
+  CFLAGS += -DWOLFBOOT_ENABLE_WOLFHSM_SERVER -DWOLFHSM_CFG_ENABLE_SERVER
+  CFLAGS += -DWOLFHSM_CFG_CERT_MAX_VERIFY_ROOTS=$(WOLFHSM_CFG_CERT_MAX_VERIFY_ROOTS)
+  # HAL crypto devId abstraction for wolfHSM server
+  CFLAGS += -DWOLFBOOT_DEVID_HASH=hsmDevIdHash
+  CFLAGS += -DWOLFBOOT_DEVID_PUBKEY=hsmDevIdPubKey
+  ifeq ($(ENCRYPT),1)
+    CFLAGS += -DWOLFBOOT_DEVID_CRYPT=hsmDevIdCrypt
+  endif
+
+  # Ensure wolfHSM is configured to use certificate manager if we are
+  # doing cert chain verification
+  ifneq ($(CERT_CHAIN_VERIFY),)
+    CFLAGS += -I"$(WOLFBOOT_LIB_WOLFSSL)"
+    WOLFCRYPT_OBJS += \
+      $(WOLFBOOT_LIB_WOLFSSL)/src/internal.o \
+      $(WOLFBOOT_LIB_WOLFSSL)/src/ssl.o \
+      $(WOLFBOOT_LIB_WOLFSSL)/src/ssl_certman.o
+
+    WOLFHSM_OBJS += \
+      $(WOLFBOOT_LIB_WOLFHSM)/src/wh_message_cert.o \
+      $(WOLFBOOT_LIB_WOLFHSM)/src/wh_server_cert.o
+    CFLAGS += -DWOLFHSM_CFG_CERTIFICATE_MANAGER
+  endif
+
+endif
+
+# NS16550-compatible UART, as an additional instance-based port (see
+# include/ns16550.h). Independent of DEBUG_UART: that selects the single
+# global debug console, this adds a driver for a second port whose base
+# address may only be known at runtime (e.g. read from the device tree).
+ifeq ($(NS16550),1)
+  CFLAGS += -DWOLFBOOT_NS16550
+  # arch.mk (included first) already adds this object on targets that put
+  # their debug console on the same driver, so only add it when absent -
+  # naming it twice makes the link fail with multiple definitions.
+  ifeq (,$(filter hal/uart/ns16550.o,$(OBJS)))
+    OBJS += hal/uart/ns16550.o
+  endif
+endif
+# Non-cacheable DDR carve-out for bus-master DMA (hal/zynq.ld). Substituted
+# into the linker script only; code uses the _dma_buffers_start/_end symbols
+# the script exports rather than this address.
+WOLFBOOT_DMA_BUFFER_ADDRESS?=0x8200000
+
+# wolfBoot hooks framework
+# WOLFBOOT_HOOKS_FILE: path to a single .c file containing hook definitions
+WOLFBOOT_HOOKS_ENABLED :=
+ifeq ($(WOLFBOOT_HOOK_LOADER_PREINIT),1)
+  CFLAGS += -DWOLFBOOT_HOOK_LOADER_PREINIT
+  WOLFBOOT_HOOKS_ENABLED := 1
+endif
+ifeq ($(WOLFBOOT_HOOK_LOADER_POSTINIT),1)
+  CFLAGS += -DWOLFBOOT_HOOK_LOADER_POSTINIT
+  WOLFBOOT_HOOKS_ENABLED := 1
+endif
+ifeq ($(WOLFBOOT_HOOK_PREBOOT),1)
+  CFLAGS += -DWOLFBOOT_HOOK_PREBOOT
+  WOLFBOOT_HOOKS_ENABLED := 1
+endif
+ifeq ($(WOLFBOOT_HOOK_BOOT),1)
+  CFLAGS += -DWOLFBOOT_HOOK_BOOT
+  WOLFBOOT_HOOKS_ENABLED := 1
+endif
+ifeq ($(WOLFBOOT_HOOK_PANIC),1)
+  CFLAGS += -DWOLFBOOT_HOOK_PANIC
+  WOLFBOOT_HOOKS_ENABLED := 1
+endif
+ifneq ($(WOLFBOOT_HOOKS_ENABLED),)
+  ifeq ($(WOLFBOOT_HOOKS_FILE),)
+    $(error WOLFBOOT_HOOKS_FILE must be set to a .c file when hooks are enabled)
+  endif
+  OBJS += $(patsubst %.c,%.o,$(WOLFBOOT_HOOKS_FILE))
+endif
+
+# Cert chain verification options
+ifneq ($(CERT_CHAIN_VERIFY),)
+  CFLAGS += -DWOLFBOOT_CERT_CHAIN_VERIFY
+  # export the private key in DER format so it can be used with certificates
+  KEYGEN_OPTIONS += --der
+
+  # Optional override for the wolfHSM trusted-root NVM ID list used during
+  # cert-chain verification. Expects a comma-separated initializer (no quotes,
+  # no spaces), e.g. WOLFHSM_NVM_ROOT_CA_LIST=1,2,3. Bounded by
+  # WOLFHSM_CFG_CERT_MAX_VERIFY_ROOTS (settable in .config; must match the HSM
+  # server firmware's build). When unset, falls back to a HAL-specified default
+  ifneq ($(strip $(WOLFHSM_NVM_ROOT_CA_LIST)),)
+    CFLAGS += '-DWOLFBOOT_WOLFHSM_NVM_ROOT_CA_LIST=$(WOLFHSM_NVM_ROOT_CA_LIST)'
+  endif
+
+  # User-provided cert chain takes precedence. Declare the chain's
+  # algorithms via AUX_PK_ALGOS/AUX_HASH_ALGOS so the verifier has them.
+  ifneq ($(USER_CERT_CHAIN),)
+    CERT_CHAIN_FILE = $(USER_CERT_CHAIN)
+  else
+    # Auto-generate dummy cert chain (when USER_CERT_CHAIN not provided)
+    CERT_CHAIN_FILE = test-dummy-ca/raw-chain.der
+
+    # The leaf cert wraps the signing key, so its algo follows SIGN
+    ifeq ($(SIGN),ECC256)
+      CERT_CHAIN_GEN_LEAF_ALGO:=ecc256
+    endif
+    ifeq ($(SIGN),ECC384)
+      CERT_CHAIN_GEN_LEAF_ALGO:=ecc384
+    endif
+    ifeq ($(SIGN),ECC521)
+      CERT_CHAIN_GEN_LEAF_ALGO:=ecc521
+    endif
+    ifeq ($(SIGN),RSA2048)
+      CERT_CHAIN_GEN_LEAF_ALGO:=rsa2048
+    endif
+    ifeq ($(SIGN),RSA3072)
+      CERT_CHAIN_GEN_LEAF_ALGO:=rsa3072
+    endif
+    ifeq ($(SIGN),RSA4096)
+      CERT_CHAIN_GEN_LEAF_ALGO:=rsa4096
+    endif
+    ifeq ($(SIGN),RSAPSS2048)
+      CERT_CHAIN_GEN_LEAF_ALGO:=rsa2048
+    endif
+    ifeq ($(SIGN),RSAPSS3072)
+      CERT_CHAIN_GEN_LEAF_ALGO:=rsa3072
+    endif
+    ifeq ($(SIGN),RSAPSS4096)
+      CERT_CHAIN_GEN_LEAF_ALGO:=rsa4096
+    endif
+    ifeq ($(CERT_CHAIN_GEN_LEAF_ALGO),)
+      $(error dummy cert chain generation does not support SIGN=$(SIGN); \
+        provide USER_CERT_CHAIN instead)
+    endif
+
+    # Root/intermediate key algo and cert signature hash are configurable
+    CERT_CHAIN_GEN_CA_ALGO?=$(CERT_CHAIN_GEN_LEAF_ALGO)
+    CERT_CHAIN_GEN_CA_HASH?=sha256
+
+    # Compile in the CA's algorithms so the chain verifies in boot
+    ifneq ($(CERT_CHAIN_GEN_CA_ALGO),$(CERT_CHAIN_GEN_LEAF_ALGO))
+      AUX_PK_ALGOS:=$(AUX_PK_ALGOS),$(CERT_CHAIN_GEN_CA_ALGO)
+    endif
+    ifneq ($(CERT_CHAIN_GEN_CA_HASH),sha256)
+      AUX_HASH_ALGOS:=$(AUX_HASH_ALGOS),$(CERT_CHAIN_GEN_CA_HASH)
+    endif
+  endif
+  # Reasonably large default cert buffer when RSA4096 is in the chain
+  ifneq (,$(filter rsa4096,$(CERT_CHAIN_GEN_CA_ALGO) $(CERT_CHAIN_GEN_LEAF_ALGO)))
+    CFLAGS += -DWOLFHSM_CFG_MAX_CERT_SIZE=4096
+  endif
+  SIGN_OPTIONS += --cert-chain $(CERT_CHAIN_FILE)
+endif
+
+# Clock Speed (Hz)
+ifneq ($(CLOCK_SPEED),)
+	CFLAGS += -DCLOCK_SPEED=$(CLOCK_SPEED)
+endif
+
+# STM32F4 clock options
+ifneq ($(STM32_PLLM),)
+	CFLAGS += -DSTM32_PLLM=$(STM32_PLLM)
+endif
+ifneq ($(STM32_PLLN),)
+	CFLAGS += -DSTM32_PLLN=$(STM32_PLLN)
+endif
+ifneq ($(STM32_PLLP),)
+	CFLAGS += -DSTM32_PLLP=$(STM32_PLLP)
+endif
+ifneq ($(STM32_PLLQ),)
+	CFLAGS += -DSTM32_PLLQ=$(STM32_PLLQ)
+endif
+
+# STM32 UART options
+ifeq ($(USE_UART1),1)
+	CFLAGS += -DUSE_UART1=1
+endif
+
+ifeq ($(USE_UART3),1)
+	CFLAGS += -DUSE_UART3=1
+endif
+
+ifneq ($(WOLFBOOT_PARTITION_FILENAME),)
+	CFLAGS += -DWOLFBOOT_PARTITION_FILENAME=$(WOLFBOOT_PARTITION_FILENAME)
+endif
+
+# Clock Restore Option (default on)
+ifneq ($(WOLFBOOT_RESTORE_CLOCK),0)
+	CFLAGS += -DWOLFBOOT_RESTORE_CLOCK
+endif
+
+ifeq ($(TZEN),1)
+  CFLAGS+=-DTZEN
+endif
+
+ifeq ($(WOLFBOOT_SECURE_APP),1)
+  CFLAGS+=-DWOLFBOOT_SECURE_APP
+  ifneq ($(WOLFBOOT_SECURE_HANDOFF_ADDRESS),)
+    CFLAGS+=-D"WOLFBOOT_SECURE_HANDOFF_ADDRESS=$(WOLFBOOT_SECURE_HANDOFF_ADDRESS)"
+  endif
+endif
+
+# Auxiliary algorithms: compile extra wolfCrypt code beyond what SIGN/HASH
+# selects, for features that need it (cert-chain verification, TPM, ...).
+# Auxiliary algorithms are never used to verify image signatures.
+# AUX_PK_ALGOS / AUX_HASH_ALGOS take comma-separated, case-insensitive
+# entries, e.g. AUX_PK_ALGOS=rsa2048,ecc384 AUX_HASH_ALGOS=sha384.
+# This section must stay below anything that appends to the two lists
+# (e.g. the cert-chain block above).
+AUX_PK_ALGOS?=
+AUX_HASH_ALGOS?=
+AUX_PK_LIST:=$(sort $(shell echo $(AUX_PK_ALGOS) | tr 'A-Z,' 'a-z '))
+AUX_HASH_LIST:=$(sort $(shell echo $(AUX_HASH_ALGOS) | tr 'A-Z,' 'a-z '))
+SIGN_TOKENS_LC:=$(shell echo $(SIGN) $(SIGN_SECONDARY) | tr 'A-Z' 'a-z')
+
+# TPM needs ECC or RSA for the SRK and parameter encryption
+ifeq ($(WOLFTPM),1)
+  ifeq (,$(filter ecc% rsa%,$(SIGN_TOKENS_LC) $(AUX_PK_LIST)))
+    AUX_PK_LIST+=ecc256
+  endif
+endif
+
+ifneq (,$(strip $(AUX_PK_LIST) $(AUX_HASH_LIST)))
+  ifeq ($(WOLFBOOT_SMALL_STACK),1)
+    $(error auxiliary algorithms not supported with WOLFBOOT_SMALL_STACK: \
+      the static pools in src/xmalloc.c only cover the primary SIGN algorithm)
+  endif
+endif
+
+AUX_PK_VALID:=ecc256 ecc384 ecc521 rsa2048 rsa3072 rsa4096 \
+  rsapss2048 rsapss3072 rsapss4096 ed25519 ed448
+AUX_HASH_VALID:=sha256 sha384 sha512 sha3
+ifneq (,$(filter-out $(AUX_PK_VALID),$(AUX_PK_LIST)))
+  $(error invalid AUX_PK_ALGOS entries "$(filter-out $(AUX_PK_VALID),$(AUX_PK_LIST))". Valid: $(AUX_PK_VALID))
+endif
+ifneq (,$(filter-out $(AUX_HASH_VALID),$(AUX_HASH_LIST)))
+  $(error invalid AUX_HASH_ALGOS entries "$(filter-out $(AUX_HASH_VALID),$(AUX_HASH_LIST))". Valid: $(AUX_HASH_VALID))
+endif
+
+# Entries matching SIGN/SIGN_SECONDARY are already compiled in
+AUX_PK_EFFECTIVE:=$(filter-out $(SIGN_TOKENS_LC),$(AUX_PK_LIST))
+
+AUX_WOLFCRYPT_OBJS:=
+ifneq (,$(filter ecc256,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_ECC256
+  AUX_WOLFCRYPT_OBJS+=$(ECC_OBJS) $(MATH_OBJS)
+endif
+ifneq (,$(filter ecc384,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_ECC384
+  AUX_WOLFCRYPT_OBJS+=$(ECC_OBJS) $(MATH_OBJS)
+endif
+ifneq (,$(filter ecc521,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_ECC521
+  AUX_WOLFCRYPT_OBJS+=$(ECC_OBJS) $(MATH_OBJS)
+endif
+ifneq (,$(filter rsa2048,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_RSA2048
+  AUX_WOLFCRYPT_OBJS+=$(RSA_OBJS) $(MATH_OBJS)
+endif
+ifneq (,$(filter rsa3072,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_RSA3072
+  AUX_WOLFCRYPT_OBJS+=$(RSA_OBJS) $(MATH_OBJS)
+endif
+ifneq (,$(filter rsa4096,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_RSA4096
+  AUX_WOLFCRYPT_OBJS+=$(RSA_OBJS) $(MATH_OBJS)
+endif
+ifneq (,$(filter rsapss2048,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_RSAPSS2048
+  AUX_WOLFCRYPT_OBJS+=$(RSA_OBJS) $(MATH_OBJS)
+endif
+ifneq (,$(filter rsapss3072,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_RSAPSS3072
+  AUX_WOLFCRYPT_OBJS+=$(RSA_OBJS) $(MATH_OBJS)
+endif
+ifneq (,$(filter rsapss4096,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_RSAPSS4096
+  AUX_WOLFCRYPT_OBJS+=$(RSA_OBJS) $(MATH_OBJS)
+endif
+ifneq (,$(filter ed25519,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_ED25519
+  AUX_WOLFCRYPT_OBJS+=$(ED25519_OBJS)
+endif
+ifneq (,$(filter ed448,$(AUX_PK_EFFECTIVE)))
+  CFLAGS+=-DWOLFBOOT_AUX_PK_ED448
+  AUX_WOLFCRYPT_OBJS+=$(ED448_OBJS)
+  AUX_WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha3.o
+  AUX_WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha512.o
+endif
+
+# ED448 defines WOLFSSL_SHA512 in user_settings.h but ED448_OBJS carries no
+# sha512.o; make sure it gets linked (deduplicated below)
+ifneq (,$(filter ED448,$(SIGN) $(SIGN_SECONDARY)))
+  AUX_WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha512.o
+endif
+
+ifneq (,$(filter sha256,$(AUX_HASH_LIST)))
+  CFLAGS+=-DWOLFBOOT_AUX_HASH_SHA256
+endif
+ifneq (,$(filter sha384,$(AUX_HASH_LIST)))
+  CFLAGS+=-DWOLFBOOT_AUX_HASH_SHA384
+  AUX_WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha512.o
+endif
+ifneq (,$(filter sha512,$(AUX_HASH_LIST)))
+  CFLAGS+=-DWOLFBOOT_AUX_HASH_SHA512
+  AUX_WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha512.o
+endif
+ifneq (,$(filter sha3,$(AUX_HASH_LIST)))
+  CFLAGS+=-DWOLFBOOT_AUX_HASH_SHA3
+  AUX_WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha3.o
+endif
+
+# Append only objects not already selected by SIGN/HASH/features.
+# Snapshot with := first: WOLFCRYPT_OBJS is a recursive variable in some
+# includers (test-app), where a self-referencing += would not terminate.
+AUX_WOLFCRYPT_OBJS_NEW:=$(filter-out $(WOLFCRYPT_OBJS),$(sort $(AUX_WOLFCRYPT_OBJS)))
+WOLFCRYPT_OBJS+=$(AUX_WOLFCRYPT_OBJS_NEW)
+
+# Under WOLFSSL_ARMASM, chacha.c defers the block function to
+# wc_chacha_crypt_bytes(), which lives in the port. arch.mk adds the aes/sha
+# equivalents unconditionally; ChaCha is only selected here, so add it last.
+ifeq ($(ARCH),AARCH64)
+  ifneq ($(NO_ARM_ASM),1)
+    ifneq (,$(filter %/wolfcrypt/src/chacha.o,$(WOLFCRYPT_OBJS)))
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/armv8-chacha-asm_c.o
+    endif
+  endif
+endif
+# ---------------------------------------------------------------------------
+# wolfCrypt FIPS 140-3 module (FIPS=1)
+#
+# Point WOLFBOOT_LIB_WOLFSSL at an unpacked FIPS / FIPS-ready wolfSSL tree.
+# The in-core integrity hash on GCC/ELF is enforced by LINK ORDER:
+# wolfcrypt_first.o must be first and wolfcrypt_last.o last, with the FIPS
+# boundary (crypto + fips.o + fips_test.o) between them. We therefore rebuild
+# WOLFCRYPT_OBJS from scratch in that order, replacing the piecemeal per-SIGN
+# selection above (the SIGN/HASH CFLAGS remain in effect). This also drops
+# AUX_WOLFCRYPT_OBJS: hybrid / secondary-signature configurations are not
+# supported with FIPS=1. See docs/FIPS.md.
+ifeq ($(FIPS),1)
+  # Intercept impossible FIPS build cases early with a clear error. Skip for
+  # clean-style goals (which do not compile/link) so 'make clean' still works
+  # with FIPS=1 in .config.
+  ifeq ($(filter %clean,$(MAKECMDGOALS)),)
+    # NO_ARM_ASM is an ARM-only knob; the FIPS module is portable C on every
+    # arch, but only the ARM/AArch64 builds have an asm crypto path to disable
+    # (which would sit outside the validated module boundary). Force it on rather
+    # than erroring when unset, so this works regardless of include order
+    # (test-app/Makefile includes options.mk before arch.mk, so NO_ARM_ASM is
+    # still empty here). Only an explicit NO_ARM_ASM=0 is a hard error.
+    ifneq ($(filter ARM AARCH64,$(ARCH)),)
+      ifeq ($(NO_ARM_ASM),0)
+        $(error FIPS=1 on $(ARCH) requires NO_ARM_ASM=1 (the FIPS module uses portable-C crypto); NO_ARM_ASM=0 was set)
+      endif
+      NO_ARM_ASM=1
+      # Fail closed on include order: the top-level Makefile includes arch.mk
+      # BEFORE options.mk, so if NO_ARM_ASM was unset when arch.mk ran (e.g.
+      # TARGET=zynq/versal/nxp_ls1028a) it has already pulled the ARM asm crypto
+      # path into CFLAGS/OBJS - which the WOLFCRYPT_OBJS := reset below does NOT
+      # remove. Force-setting NO_ARM_ASM above is too late to unwind that, so
+      # refuse rather than link asm inside the validated boundary. Set
+      # NO_ARM_ASM=1 in your .config / on the command line (arch.mk sees it first).
+      ifneq ($(filter -DWOLFSSL_ARMASM,$(CFLAGS)),)
+        $(error FIPS=1 on $(ARCH): ARM asm crypto (-DWOLFSSL_ARMASM) was already selected before options.mk; set NO_ARM_ASM=1 explicitly so arch.mk sees it first (see docs/FIPS.md))
+      endif
+    endif
+    # Only the ECDSA object set is wired into the FIPS boundary below. RSA-PSS
+    # would additionally need rsa.o inside the boundary and its own CI job.
+    ifeq ($(filter $(SIGN),ECC256 ECC384 ECC521),)
+      $(error FIPS=1 requires a FIPS-approved ECDSA SIGN (ECC256/ECC384/ECC521, see docs/FIPS.md); got $(SIGN))
+    endif
+    # The WOLFCRYPT_OBJS := reset below rebuilds ONLY the ECDSA FIPS boundary. It
+    # drops the objects the following features add while their -D CFLAGS survive,
+    # producing a confusing link error instead of a clear message. The FIPS
+    # boundary is ECDSA-only; reject unsupported combinations up front.
+    ifneq ($(SIGN_SECONDARY),)
+      $(error FIPS=1 does not support hybrid/secondary signatures (SIGN_SECONDARY=$(SIGN_SECONDARY)); see docs/FIPS.md)
+    endif
+    ifneq ($(strip $(AUX_PK_ALGOS)),)
+      $(error FIPS=1 does not support auxiliary public-key algorithms (AUX_PK_ALGOS=$(AUX_PK_ALGOS)); see docs/FIPS.md)
+    endif
+    ifeq ($(ENCRYPT),1)
+      $(error FIPS=1 does not support the image ENCRYPT path (its ChaCha/AES objects sit outside the FIPS boundary); see docs/FIPS.md)
+    endif
+    ifeq ($(WOLFTPM),1)
+      $(error FIPS=1 with WOLFTPM is not supported)
+    endif
+    ifeq ($(WOLFHSM_CLIENT),1)
+      $(error FIPS=1 with WOLFHSM_CLIENT is not supported)
+    endif
+    ifeq ($(WOLFHSM_SERVER),1)
+      $(error FIPS=1 with WOLFHSM_SERVER is not supported)
+    endif
+    # Non-wolfcrypt driver objects are appended to WOLFCRYPT_OBJS too and are
+    # likewise dropped by the reset while their src/*.o consumers stay in OBJS
+    # (undefined spi_init/spi_xfer/etc. at link). Reject them as well.
+    ifeq ($(SPI_FLASH),1)
+      $(error FIPS=1 with SPI_FLASH is not supported (driver object dropped by the FIPS WOLFCRYPT_OBJS reset))
+    endif
+    ifeq ($(QSPI_FLASH),1)
+      $(error FIPS=1 with QSPI_FLASH is not supported)
+    endif
+    ifeq ($(OCTOSPI_FLASH),1)
+      $(error FIPS=1 with OCTOSPI_FLASH is not supported)
+    endif
+    ifeq ($(UART_FLASH),1)
+      $(error FIPS=1 with UART_FLASH is not supported)
+    endif
+    ifeq ($(WOLFCRYPT_TZ_PKCS11),1)
+      $(error FIPS=1 with WOLFCRYPT_TZ_PKCS11 (SECURE_PKCS11) is not supported)
+    endif
+    # M10: SPMATH must be on. The fastmath fallback (SPMATH!=1) defines
+    # WC_NO_HARDEN in user_settings.h, disabling the side-channel hardening a
+    # FIPS build must keep (it also does ECDSA signing in its CASTs). Shipped
+    # FIPS configs set SPMATH=1 (cm4.config, sim-fips.config).
+    ifneq ($(SPMATH),1)
+      $(error FIPS=1 requires SPMATH=1 (fastmath defines WC_NO_HARDEN, dropping side-channel hardening); see docs/FIPS.md)
+    endif
+  endif
+  CFLAGS+=-DHAVE_FIPS
+  # Evaluation "FIPS-ready" bundle by default: -DWOLFBOOT_FIPS_READY defines
+  # WOLFSSL_FIPS_READY, which forces HAVE_FIPS_VERSION 7 in settings.h.
+  FIPS_READY?=1
+  ifeq ($(FIPS_READY),1)
+    CFLAGS+=-DWOLFBOOT_FIPS_READY
+  else
+    # Production/validated-bundle path. wolfBoot builds with
+    # -DWOLFSSL_USER_SETTINGS, so settings.h includes only user_settings.h and
+    # never the configure-generated wolfssl/options.h where a validated bundle
+    # supplies HAVE_FIPS_VERSION. Without WOLFSSL_FIPS_READY it would therefore
+    # fall back to FIPS v1 (140-2) silently, so pin the module version
+    # explicitly. e.g. FIPS_VERSION=7 for a 140-3 validated bundle.
+    ifndef FIPS_VERSION
+      $(error FIPS_READY=0 requires FIPS_VERSION=<n> to pin the validated wolfCrypt FIPS module version (e.g. FIPS_VERSION=7); see docs/FIPS.md)
+    endif
+    # Emit the full MAJOR/MINOR/PATCH triplet. wolfSSL builds
+    # WOLFSSL_FIPS_VERSION_CODE from all three (settings.h); emitting only
+    # HAVE_FIPS_VERSION leaves MINOR/PATCH at 0, so every FIPS_VERSION_GE(major,
+    # minor) gate on a real validated bundle (e.g. 5.2.1) evaluates as n.0.0 and
+    # silently mis-versions. MINOR/PATCH default to 0 (matches a bundle whose
+    # settings.h pins them to 0); override for a minor/patch-versioned bundle.
+    FIPS_VERSION_MINOR ?= 0
+    FIPS_VERSION_PATCH ?= 0
+    CFLAGS+=-DHAVE_FIPS_VERSION=$(FIPS_VERSION)
+    CFLAGS+=-DHAVE_FIPS_VERSION_MINOR=$(FIPS_VERSION_MINOR)
+    CFLAGS+=-DHAVE_FIPS_VERSION_PATCH=$(FIPS_VERSION_PATCH)
+  endif
+  # The FIPS module pulls in libc malloc/printf. On a bare-metal newlib target,
+  # stub the syscalls with nosys.specs; the HAL provides a bounded _sbrk so the
+  # heap cannot grow into the unverified image (see hal/cm4.c). This is WRONG for
+  # a hosted / glibc-cross toolchain, so make it opt-in per target rather than
+  # "every non-sim ARCH" - a new bare-metal FIPS target sets FIPS_NOSYS_SPECS=1.
+  FIPS_NOSYS_SPECS ?= 0
+  ifeq ($(TARGET),cm4)
+    FIPS_NOSYS_SPECS = 1
+  endif
+  ifeq ($(FIPS_NOSYS_SPECS),1)
+    LDFLAGS += --specs=nosys.specs
+  endif
+  WCDIR=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src
+  WOLFCRYPT_OBJS := \
+    $(WCDIR)/wolfcrypt_first.o \
+    $(WCDIR)/hash.o \
+    $(WCDIR)/hmac.o \
+    $(WCDIR)/kdf.o \
+    $(WCDIR)/pwdbased.o \
+    $(WCDIR)/random.o \
+    $(WCDIR)/sha.o \
+    $(WCDIR)/sha256.o \
+    $(WCDIR)/sha512.o \
+    $(WCDIR)/sha3.o \
+    $(WCDIR)/aes.o \
+    $(WCDIR)/cmac.o \
+    $(WCDIR)/ecc.o \
+    $(WCDIR)/sp_int.o \
+    $(WCDIR)/wolfmath.o \
+    $(WCDIR)/memory.o \
+    $(WCDIR)/wc_port.o \
+    $(WCDIR)/logging.o \
+    $(WCDIR)/error.o \
+    $(WCDIR)/coding.o \
+    $(WCDIR)/asn.o \
+    $(WCDIR)/wc_encrypt.o \
+    $(WCDIR)/fips.o \
+    $(WCDIR)/fips_test.o \
+    $(WCDIR)/wolfcrypt_last.o
+endif

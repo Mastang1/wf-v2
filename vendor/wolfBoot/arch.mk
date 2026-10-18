@@ -1,0 +1,3203 @@
+## CPU Architecture selection via $ARCH
+
+# check for math library
+ifeq ($(SPMATH),1)
+  # SP Math
+  MATH_OBJS:=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_int.o
+else
+  ifeq ($(SPMATHALL),1)
+    # SP Math all
+    CFLAGS+=-DWOLFSSL_SP_MATH_ALL
+    MATH_OBJS:=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_int.o
+  else
+    # Fastmath
+    CFLAGS+=-DUSE_FAST_MATH
+    MATH_OBJS:=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/integer.o $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/tfm.o
+  endif
+endif
+
+# Default flash offset
+ARCH_FLASH_OFFSET?=0x0
+
+# Default SPI driver name
+SPI_TARGET=$(TARGET)
+I2C_TARGET=$(TARGET)
+
+# Default UART driver name
+UART_TARGET=$(TARGET)
+
+# Include some modules by default
+WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sha256.o \
+                $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/hash.o \
+                $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/memory.o \
+                $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/wc_port.o \
+                $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/wolfmath.o
+
+
+ifeq ($(ARCH),x86_64)
+  CFLAGS+=-DARCH_x86_64 -DFAST_MEMCPY
+  ifeq ($(FORCE_32BIT),1)
+    NO_ASM=1
+    CFLAGS+=-DFORCE_32BIT
+  endif
+  ifeq ($(SPMATH),1)
+    ifeq ($(NO_ASM),1)
+      ifeq ($(FORCE_32BIT),1)
+        MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+        CFLAGS+=-DWOLFSSL_SP_DIV_WORD_HALF
+      else
+        MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c64.o
+      endif
+    else
+      MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_x86_64.o
+      MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_x86_64_asm.o
+      WOLFCRYPT_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/cpuid.o
+    endif
+  endif
+  ifeq ($(TARGET),x86_64_efi)
+     OBJS+=src/boot_x86_64.o
+    ifeq ($(DEBUG),1)
+      CFLAGS+=-DWOLFBOOT_DEBUG_EFI=1
+    endif
+  endif
+endif
+
+## ARM Cortex-A
+ifeq ($(ARCH),AARCH64)
+  ifeq ($(TARGET),aarch64_efi)
+    # UEFI app: Linux GNU toolchain (freestanding EFI ABI), not aarch64-none-elf-
+    CROSS_COMPILE?=aarch64-linux-gnu-
+  else
+    CROSS_COMPILE?=aarch64-none-elf-
+  endif
+  CFLAGS+=-DARCH_AARCH64 -DFAST_MEMCPY
+  ifeq ($(TARGET),aarch64_efi)
+    # UEFI app: gnu-efi CRT0 is the entry; do_boot is in boot_aarch64_efi.o.
+    # Skip the bare-metal reset (boot_aarch64_start.S) and EL2/GIC glue.
+    OBJS+=src/boot_aarch64_efi.o
+  else
+    OBJS+=src/boot_aarch64.o src/boot_aarch64_start.o src/boot_aarch64_cache.o
+  endif
+
+  ifeq ($(TARGET),zynq)
+    ARCH_FLAGS=-march=armv8-a+crypto
+    CFLAGS+=$(ARCH_FLAGS) -DCORTEX_A53
+    CFLAGS+=-DNO_QNX
+    # Support detection and skip of U-Boot legacy header */
+    CFLAGS+=-DWOLFBOOT_UBOOT_LEGACY
+    CFLAGS+=-DWOLFBOOT_DUALBOOT
+    # FPGA bitstream-from-FIT is supported via the PMU firmware
+    # (PM_FPGA_LOAD). Enable with FPGA_BITSTREAM=1 (opt-in).
+
+    ifeq ($(HW_SHA3),1)
+      # Use HAL for hash (see zynqmp.c)
+      HASH_HAL=1
+      CFLAGS+=-DWOLFBOOT_ZYNQMP_CSU
+    endif
+
+    ifeq ($(ZYNQMP_FSBL),1)
+      # wolfBoot fully replaces the Xilinx FSBL: the BootROM authenticates and
+      # loads wolfBoot into OCM at EL3, and wolfBoot runs psu_init() to bring up
+      # the PLLs/DDR/MIO/clocks before loading the downstream images. wolfBoot
+      # therefore links and runs entirely from OCM (DDR is not up at entry).
+      #
+      # The board-specific psu_init_gpl.c / psu_init_gpl.h (generated from the
+      # XSA, Xilinx copyright) are supplied at build time from
+      # ZYNQMP_PSU_INIT_DIR and are NOT part of the wolfBoot tree. The
+      # hal/zynqmp/ shim headers (xil_io.h, sleep.h) let that unmodified file
+      # compile. Set EL3_SECURE=1 in the target .config.
+      ZYNQMP_PSU_INIT_DIR?=hal/board/zynqmp
+      CFLAGS+=-DWOLFBOOT_ZYNQMP_FSBL
+      CFLAGS+=-Ihal/zynqmp -I$(ZYNQMP_PSU_INIT_DIR)
+      LSCRIPT_IN=hal/zynqmp_ocm.ld
+      OBJS+=hal/zynqmp_psu_shim.o
+      OBJS+=hal/zynqmp_atf.o
+      OBJS+=$(ZYNQMP_PSU_INIT_DIR)/psu_init_gpl.o
+
+      # Load the PMU configuration object (EEMI permission table) into PMU
+      # firmware so the APU can control the SoC nodes. Like psu_init_gpl.c the
+      # pm_cfg_obj.c is design-specific and supplied from ZYNQMP_PSU_INIT_DIR.
+      ifeq ($(ZYNQMP_PM_CFG),1)
+        CFLAGS+=-DWOLFBOOT_ZYNQMP_PM_CFG
+        OBJS+=$(ZYNQMP_PSU_INIT_DIR)/pm_cfg_obj.o
+      endif
+
+      # Run the PS-GTR serdes init (USB3/SATA/PCIe/DP PHY lanes). Required if the
+      # kernel drives a PS-GTR peripheral (e.g. USB3 dwc3, whose probe hangs on
+      # an unclocked PHY). Skipped by default since QSPI/SD/RGMII boot needs no
+      # serdes; the shim runs the full calibrated sequence when enabled.
+      ifeq ($(ZYNQMP_PSU_INIT_SERDES),1)
+        CFLAGS+=-DZYNQMP_PSU_INIT_SERDES
+      endif
+
+      # FSBL security features (eFuse read, PUF, AES-CSU). At EL3 these access
+      # the CSU/eFuse controllers directly (pmu_mmio is direct MMIO in FSBL
+      # mode). Read-only eFuse dump today; PUF/AES land incrementally.
+      ifeq ($(ZYNQMP_SEC),1)
+        CFLAGS+=-DWOLFBOOT_ZYNQMP_FSBL_SEC
+      endif
+      # PUF register+regenerate self-test at boot (bring-up only; registers the
+      # PUF every boot). Opt-in, needs ZYNQMP_SEC=1.
+      ifeq ($(ZYNQMP_PUF_SELFTEST),1)
+        CFLAGS+=-DWOLFBOOT_ZYNQMP_PUF_SELFTEST
+      endif
+      # AES-CSU known-answer self-test at boot (KUP key; eFuse-safe). Opt-in.
+      ifeq ($(ZYNQMP_AES_SELFTEST),1)
+        CFLAGS+=-DWOLFBOOT_ZYNQMP_AES_SELFTEST
+      endif
+    endif
+
+  endif
+
+  ifeq ($(TARGET),versal)
+    # AMD Versal ACAP (VMK180) - Dual Cortex-A72
+    ARCH_FLAGS=-mcpu=cortex-a72+crypto -march=armv8-a+crypto -mtune=cortex-a72
+    CFLAGS+=$(ARCH_FLAGS) -DCORTEX_A72
+    CFLAGS+=-DWOLFBOOT_DUALBOOT
+    # Support detection and skip of U-Boot legacy header
+    CFLAGS+=-DWOLFBOOT_UBOOT_LEGACY
+    # NOTE: FPGA_BITSTREAM is stubbed on Versal (PL config is a PDI loaded
+    # by the PLM via XilLoader Load-PDI IPI - not yet implemented). Leave
+    # FPGA_BITSTREAM off until that path lands.
+    # PLM owns RVBAR on Versal in JTAG boot; skip RVBAR writes
+    CFLAGS+=-DSKIP_RVBAR=1
+    # Disable SDMA for multi-block transfers - use PIO instead.
+    # The Versal Arasan SDHCI controller does not restart SDMA after
+    # boundary crossings via SRS22/SRS23 writes (Cadence-specific behavior).
+    CFLAGS_EXTRA+=-DSDHCI_SDMA_DISABLED
+  endif
+
+  ifeq ($(TARGET),agilex5)
+    # Altera Agilex 5: Cortex-A55, entered as non-secure BL33 at EL2 by
+    # the GSRD TF-A BL31 image. SPL owns DDR, clocks, pinmux and resets.
+    ARCH_FLAGS=-mcpu=cortex-a55+crypto -march=armv8.2-a+crypto \
+               -mtune=cortex-a55
+    CFLAGS+=$(ARCH_FLAGS) -DCORTEX_A55
+    CFLAGS+=-DWOLFBOOT_DUALBOOT -DWOLFBOOT_UBOOT_LEGACY
+    # BL31 owns GICv3 and secondary-core/PSCI setup. Do not touch RVBAR.
+    CFLAGS+=-DSKIP_RVBAR=1 -DSKIP_GIC_INIT=1
+    ifeq ($(DEBUG_UART),1)
+      OBJS+=hal/uart/ns16550.o
+    endif
+    # Full SDHCI host reset: SPL leaves the Cadence host in UHS-I 1.8V/SDR104,
+    # which mutes CMD8 against the 3.3V re-powered card (hardware-verified).
+  endif
+
+  ifeq ($(TARGET),nxp_ls1028a)
+    # DUART console on the generic driver (plain MMIO on AArch64).
+    ifeq ($(DEBUG_UART),1)
+      OBJS+=hal/uart/ns16550.o
+    endif
+    ARCH_FLAGS=-mcpu=cortex-a72+crypto -march=armv8-a+crypto -mtune=cortex-a72
+    CFLAGS+=$(ARCH_FLAGS) -DCORTEX_A72
+    # ZynqMP RVBAR (0xFD5C0040) does not exist on LS1028A -- the store faults
+    # pre-UART. Its reset vector comes from the boot ROM (DCFG BOOTLOCPTR).
+    CFLAGS+=-DSKIP_RVBAR=1
+    # MMU on (boot_aarch64_start.S LS1028A table): DDR Normal cacheable -- required
+    # for coherency with the ENETC coherent DMA (SICAR=0x27276767); CCSR/BAR Device.
+    CFLAGS +=-ffunction-sections -fdata-sections
+    LDFLAGS+=-Wl,--gc-sections
+
+    ifeq ($(DEBUG_UART),0)
+      CFLAGS+=-fno-builtin-printf
+    endif
+
+    # SD card disk boot uses the Freescale eSDHC driver, not the Cadence
+    # SDHCI one (the shared AARCH64 block below wires update_disk.o).
+    # hal/nxp_esdhc.c is SD card only, so DISK_EMMC has no driver here:
+    # reject it rather than silently link the wrong controller driver.
+    ifeq ($(DISK_EMMC),1)
+      $(error DISK_EMMC is not supported on nxp_ls1028a (hal/nxp_esdhc.c is SD card only))
+    endif
+    ifeq ($(DISK_SDCARD),1)
+      override DISK_DRIVER=esdhc
+      OBJS+=hal/nxp_esdhc.o
+    endif
+
+    SPI_TARGET=nxp
+  endif
+
+  ifeq ($(TARGET),tegra234)
+    # NVIDIA Jetson Orin (Tegra234, Cortex-A78AE): bare-metal wolfBoot as the
+    # BL33 firmware stage. The UEFI-application alternative is the aarch64_efi
+    # target. See hal/tegra234.c.
+    # -mstrict-align: wolfBoot runs with the MMU off, where every access is
+    # Device-nGnRnE and an unaligned access takes an alignment fault. Without
+    # it the compiler is free to emit unaligned accesses for struct copies.
+    ARCH_FLAGS=-mcpu=cortex-a78+crypto -march=armv8.2-a+crypto -mstrict-align
+    CFLAGS+=$(ARCH_FLAGS) -DCORTEX_A78
+    # wolfBoot links and runs at the BL33 (cpubl) load address; must agree with
+    # ORIGIN in hal/tegra234.ld or the RAM-boot overlap guard misjudges where
+    # wolfBoot lives.
+    WOLFBOOT_ORIGIN=0x272000000
+    # Bring-up: dump the state the prior stage handed wolfBoot (entry EL,
+    # SCTLR/MMU/cache bits, handoff x0/DTB pointer). Read-only; opt out for a
+    # quiet build.
+    ifeq ($(TEGRA234_HANDOFF_DUMP),1)
+      CFLAGS+=-DTEGRA234_HANDOFF_DUMP
+    endif
+    # SDMMC1 bring-up probe. Separate from the dump above because it MUTATES
+    # SoC state the booted OS inherits: it enables the SDMMC1 clock, deasserts
+    # its reset, and drives the SD power-rail GPIO. Off unless asked for.
+    ifeq ($(TEGRA234_SDMMC_PROBE),1)
+      CFLAGS+=-DTEGRA234_SDMMC_PROBE
+    endif
+    # MMU/WOLFBOOT_FDT/DUALBOOT + fdt.o come from the shared AARCH64 block.
+    # tegra234 stays MMU-off at runtime (1:1 physical); those flags only pull
+    # in the FDT/DTS codepath. EL2_HYPERVISOR+BOOT_EL1 add the EL2->EL1 drop
+    # with the DTB in x0 (config/examples/tegra234-linux.config).
+    ifeq ($(EL2_HYPERVISOR),1)
+      CFLAGS+=-DEL2_HYPERVISOR=1
+    endif
+    # BOOT_EL1 itself is emitted by options.mk; nothing to add here.
+  endif
+
+  ifeq ($(TARGET),imx8qm)
+    # Bare-metal wolfBoot as BL33, replacing U-Boot in the NXP boot container.
+    # SCFW trains DDR before any A-core runs. A53 is the lowest common
+    # denominator across the cluster pair; -mstrict-align because the MMU is off.
+    ARCH_FLAGS=-mcpu=cortex-a53+crypto -march=armv8-a+crypto -mstrict-align
+    CFLAGS+=$(ARCH_FLAGS) -DCORTEX_A53
+    # BL33 entry address. Must agree with ORIGIN in hal/imx8qm.ld.
+    WOLFBOOT_ORIGIN=0x80020000
+    # The RVBAR write in the full startup path is a ZynqMP register.
+    CFLAGS+=-DSKIP_RVBAR=1
+    # On by default: the SCU owns the console's power, clock and pads, so this
+    # is not optional at real BL33 entry.
+    IMX8QM_SCU ?= 1
+    ifeq ($(IMX8QM_SCU),1)
+      CFLAGS+=-DIMX8QM_SCU=1
+    endif
+    # Cacheable DRAM for load-and-verify, torn down before handoff.
+    ifeq ($(IMX8QM_MMU),1)
+      # The teardown needs the stack-free assembly routine in
+      # src/boot_aarch64_start.S, which this selects.
+      CFLAGS+=-DIMX8QM_MMU -DWOLFBOOT_AARCH64_MMU_TEARDOWN
+      # With the MMU on, DRAM is Normal cacheable and the wolfcrypt ARMv8
+      # assembly is safe: its NEON multi-register loads are only a problem
+      # while memory is Device-typed, which is why the shared AArch64 block
+      # defaults NO_ARM_ASM=1. Worth having, because SHA-384 dominates this
+      # target's boot: 4011 ms to 557 ms over a 32 MB image, hardware
+      # measured, with the signature still verifying. Set NO_ARM_ASM=1 to
+      # opt back out. This is first, so it wins the later ?= default.
+      NO_ARM_ASM ?= 0
+    endif
+    # Opt-in: pin the SD node to 3.3V high-speed and cap its clock. Off by
+    # default, since the board runs DDR50 at 50 MHz. Set it to keep Linux out
+    # of UHS, which is what makes a warm reboot work: once the card is at
+    # 1.8V, a reboot does no VDD cycle and wolfBoot's 3.3V CMD8 times out.
+    ifeq ($(IMX8QM_SD_NO_UHS),1)
+      CFLAGS+=-DIMX8QM_SD_NO_UHS
+    endif
+    # uSDHC board facts. Here rather than in the config because a command-line
+    # CFLAGS_EXTRA= would replace the config's, whereas CFLAGS is additive.
+    ifneq ($(filter 1,$(DISK_SDCARD) $(DISK_EMMC)),)
+      # Card detect is lsio_gpio5[22], so PRES_STATE bit 16 never sets.
+      # SDMA is on: the read is the dominant boot cost and PIO caps it near
+      # 1.6 MB/s regardless of bus clock. IMX8QM_SDHCI_PIO=1 falls back.
+      CFLAGS+=-DSDHCI_FORCE_CARD_DETECT
+      ifeq ($(IMX8QM_SDHCI_PIO),1)
+        CFLAGS+=-DSDHCI_SDMA_DISABLED
+      endif
+      # Read the payload in 64 KB chunks rather than the 512-byte default.
+      # A 32 MB image is 63083 separate commands at 512 bytes, and every one
+      # of them is below SDHCI_DMA_THRESHOLD (4 KB), so the transfer never
+      # reaches the SDMA path and pays full per-command overhead instead.
+      DISK_BLOCK_SIZE ?= 65536
+      CFLAGS+=-DDISK_BLOCK_SIZE=$(DISK_BLOCK_SIZE)
+      # Clock ceiling per medium: the SD is a removable slot whose sustained
+      # reads fail CRC above 25 MHz here; the soldered 8-bit eMMC has no such
+      # limit and takes the 3.3V high-speed rate. DISK_EMMC wins if both are
+      # set, matching the base-address selection in hal/imx8qm.c.
+      ifeq ($(DISK_EMMC),1)
+        IMX8QM_USDHC_MAX_CLK_KHZ ?= 52000
+      else ifeq ($(IMX8QM_SD_NO_UHS),1)
+        IMX8QM_USDHC_MAX_CLK_KHZ ?= 25000
+      else
+        IMX8QM_USDHC_MAX_CLK_KHZ ?= 50000
+      endif
+      CFLAGS+=-DIMX8QM_USDHC_MAX_CLK_KHZ=$(IMX8QM_USDHC_MAX_CLK_KHZ)
+    endif
+    # MMU/WOLFBOOT_FDT/DUALBOOT come from the shared AARCH64 block and only pull
+    # in the FDT codepath; imx8qm still runs MMU-off, 1:1.
+    ifeq ($(EL2_HYPERVISOR),1)
+      CFLAGS+=-DEL2_HYPERVISOR=1
+    endif
+  endif
+
+  ifeq ($(TARGET),imx95_a55)
+    # NXP i.MX95 Cortex-A55 cluster, running as BL33 in AHAB container 2.
+    # -mstrict-align because this stage runs with the MMU off, so every access
+    # is Device-nGnRnE and unaligned ones fault.
+    ARCH_FLAGS=-mcpu=cortex-a55+crypto -march=armv8.2-a+crypto -mstrict-align
+    CFLAGS+=$(ARCH_FLAGS) -DCORTEX_A55
+    LDFLAGS+=$(ARCH_FLAGS)
+    # BL31 loads and enters this image here; must match ORIGIN in
+    # hal/imx95_a55.ld and IMX95_BL33_BASE in hal/imx95_a55.h.
+    WOLFBOOT_ORIGIN=0x90200000
+    # Console, SCMI client and uSDHC driver all live in hal/imx95_a55.c, so none
+    # needs its own object; the switches below pick which paths compile in.
+    # Bring-up aid: print the entry EL, SCTLR and handoff x0 that BL31 passed.
+    ifeq ($(IMX95_HANDOFF_DUMP),1)
+      CFLAGS+=-DIMX95_HANDOFF_DUMP
+    endif
+    # i.MX95 is GICv3 and BL31 already configured it. EL2_HYPERVISOR is not a
+    # generic options.mk variable, so it is emitted here as tegra234 does.
+    ifeq ($(EL2_HYPERVISOR),1)
+      CFLAGS+=-DEL2_HYPERVISOR=1
+    endif
+    # i.MX uSDHC is not SDHCI-compatible: skip src/sdhci.c, use our driver.
+    ifneq ($(filter 1,$(DISK_SDCARD) $(DISK_EMMC)),)
+      DISK_DRIVER=usdhc
+      # SCMI cold-init of uSDHC2 (clock+pinmux) when no prior stage did it.
+      ifeq ($(IMX95_SCMI_COLD_INIT),1)
+        CFLAGS+=-DIMX95_SCMI_COLD_INIT
+      endif
+    endif
+    # SCMI M7 power-on + TCM ECC scrub (U-Boot's power_on_m7 equivalent) for a
+    # Cortex-M7 that Linux launches later. Independent of the disk driver.
+    ifeq ($(IMX95_INIT_M7),1)
+      CFLAGS+=-DIMX95_INIT_M7
+    endif
+    # One-shot diagnostic: read the AHAB container out of the eMMC boot
+    # partitions and report it, from inside an image that boots from SD.
+    ifeq ($(IMX95_EMMC_PROBE),1)
+      CFLAGS+=-DIMX95_EMMC_PROBE
+      OBJS+=hal/imx95_ahab.o
+    endif
+    # Mirror the console into a DDR ring that survives the handoff to Linux.
+    ifeq ($(IMX95_LOG_RING),1)
+      CFLAGS+=-DIMX95_LOG_RING
+    endif
+    # Stage 1 and BL33 must agree on where the ring lives, and both read this
+    # from arch.mk, which stage1/Makefile includes.
+    ifneq ($(IMX95_LOG_RING_BASE),)
+      CFLAGS+=-DIMX95_LOG_RING_BASE=$(IMX95_LOG_RING_BASE)
+    endif
+    # Verbose per-step trace of the SCMI cold-init and SD bring-up.
+    ifeq ($(IMX95_SCMI_DEBUG),1)
+      CFLAGS+=-DIMX95_SCMI_DEBUG
+    endif
+  endif
+
+  ifeq ($(TARGET),cm4)
+    # Raspberry Pi Compute Module 4 - Broadcom BCM2711, Cortex-A72
+    ARCH_FLAGS=-mcpu=cortex-a72+crypto -march=armv8-a+crypto -mtune=cortex-a72
+    # -mstrict-align: the plain RAM-boot config runs with the MMU off (simple
+    # startup), where all memory is Device-nGnRnE and unaligned access faults.
+    # The FIPS / disk configs bring up an identity MMU first (CM4_USE_MMU in
+    # hal/cm4.c). cm4 defaults to NO_ARM_ASM=1, which keeps it off the wolfcrypt
+    # ARM port asm (NEON structure loads); it does NOT disable the SP ECC
+    # AArch64 asm, which is gated on __aarch64__ in include/user_settings.h. So
+    # -mstrict-align keeps every config safe either way.
+    CFLAGS+=$(ARCH_FLAGS) -DCORTEX_A72 -mstrict-align
+    # RAUC A/B slot selection via a raw U-Boot env partition (wolfBoot replaces
+    # U-Boot's boot script). Adds the env state-machine module + define.
+    ifeq ($(CM4_RAUC_AB),1)
+      OBJS+=src/ubootenv.o
+      CFLAGS+=-DCM4_RAUC_AB
+    endif
+  endif
+
+  # Default ARM ASM setting for unrecognized AARCH64 targets. cm4 defaults to
+  # NO_ARM_ASM=1, which keeps it off the wolfcrypt ARM port asm (WOLFSSL_ARMASM /
+  # wolfcrypt/src/port/arm/*, the NEON multi-register loads that would fault
+  # MMU-off in the plain config). NO_ARM_ASM does NOT disable the SP ECC AArch64
+  # asm (sp_arm64.c / WOLFSSL_SP_ARM64_ASM); that is enabled independently on
+  # __aarch64__ in include/user_settings.h, so a non-FIPS cm4 build still links
+  # sp_arm64 asm.
+  ifeq ($(filter zynq versal agilex5 nxp_ls1028a imx95_a55,$(TARGET)),)
+    NO_ARM_ASM?=1
+  endif
+
+  ifeq ($(SPMATH),1)
+    MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+    MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_arm64.o
+  endif
+  ifneq ($(NO_ARM_ASM),1)
+    ARCH_FLAGS=-mstrict-align
+    CFLAGS+=$(ARCH_FLAGS) -DWOLFSSL_ARMASM -DWOLFSSL_ARMASM_INLINE -DWC_HASH_DATA_ALIGNMENT=8 -DWOLFSSL_AARCH64_PRIVILEGE_MODE
+    WOLFCRYPT_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/cpuid.o \
+                      $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/armv8-sha512-asm_c.o \
+                      $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/armv8-sha3-asm_c.o \
+                      $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/armv8-aes-asm_c.o \
+                      $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/armv8-sha256-asm_c.o
+  endif
+endif
+
+## ARM Cortex-M
+ifeq ($(ARCH),ARM)
+  CROSS_COMPILE?=arm-none-eabi-
+  CFLAGS+=-DARCH_ARM
+  CFLAGS+=-mthumb -mlittle-endian
+  LDFLAGS+=-mthumb -mlittle-endian
+  ifeq ($(USE_GCC),1)
+    ifeq ($(findstring clang,$(notdir $(CC))),)
+    CFLAGS+=-mthumb-interwork
+    LDFLAGS+=-mthumb-interwork
+    endif
+  endif
+
+  ## Target specific configuration
+  ifeq ($(TARGET),samr21)
+    CORTEX_M0=1
+  endif
+  ifeq ($(TARGET),imx_rt)
+    CORTEX_M7=1
+  endif
+  ifeq ($(TARGET),imx95_m7)
+    CORTEX_M7=1
+  endif
+  ifeq ($(TARGET),stm32l0)
+    CORTEX_M0=1
+    SPI_TARGET=stm32
+  endif
+
+  ifeq ($(TARGET),stm32c0)
+    CORTEX_M0=1
+    ARCH_FLASH_OFFSET=0x08000000
+  endif
+
+  ifeq ($(TARGET),stm32g0)
+    CORTEX_M0=1
+    ARCH_FLASH_OFFSET=0x08000000
+  endif
+
+  ifeq ($(TARGET),stm32g4)
+    ARCH_FLASH_OFFSET=0x08000000
+  endif
+
+  ifeq ($(TARGET),stm32f1)
+    CORTEX_M3=1
+    NO_ARM_ASM=1
+    ARCH_FLASH_OFFSET=0x08000000
+  endif
+
+  ifeq ($(TARGET),stm32f4)
+    ARCH_FLASH_OFFSET=0x08000000
+    SPI_TARGET=stm32
+  endif
+
+  ifeq ($(TARGET),max32666)
+    ARCH_FLASH_OFFSET=0x10000000
+    ifeq ($(MAX32666_FTHR2),1)
+      CFLAGS+=-DMAX32666_FTHR2
+    endif
+    # MAX3266X TPU hardware SHA256 acceleration (requires MSDK_DIR)
+    ifeq ($(MAX3266X_TPU),1)
+      NO_ARM_ASM=1
+      CFLAGS+=-DMAX3266X_SHA -DFAST_MEMCPY
+      CFLAGS+=-ffunction-sections -fdata-sections
+      CFLAGS+=-DTARGET=MAX32665 -DTARGET_REV=0x4131
+      ifeq ($(MAX3266X_OLD),1)
+        # Older Maxim SDK tree (flat MAX32665PeriphDriver layout)
+        CFLAGS+=-DWOLFSSL_MAX3266X_OLD
+        MAX3266X_CFLAGS:= \
+          -I$(MSDK_DIR)/Libraries/MAX32665PeriphDriver/Include/ \
+          -I$(MSDK_DIR)/Libraries/CMSIS/Device/Maxim/MAX32665/Include/ \
+          -I$(MSDK_DIR)/Libraries/CMSIS/Include/
+        CFLAGS+=$(MAX3266X_CFLAGS)
+        OBJS+=$(MSDK_DIR)/Libraries/MAX32665PeriphDriver/Source/mxc_sys.o \
+              $(MSDK_DIR)/Libraries/MAX32665PeriphDriver/Source/mxc_delay.o
+      else
+        CFLAGS+=-DWOLFSSL_MAX3266X
+        MAX3266X_CFLAGS:= \
+          -I$(MSDK_DIR)/Libraries/PeriphDrivers/Include/MAX32665/ \
+          -I$(MSDK_DIR)/Libraries/CMSIS/Device/Maxim/MAX32665/Include/ \
+          -I$(MSDK_DIR)/Libraries/PeriphDrivers/Source/TPU/ \
+          -I$(MSDK_DIR)/Libraries/PeriphDrivers/Source/SYS/ \
+          -I$(MSDK_DIR)/Libraries/CMSIS/Include/
+        CFLAGS+=$(MAX3266X_CFLAGS)
+        OBJS+=$(MSDK_DIR)/Libraries/PeriphDrivers/Source/TPU/tpu_me14.o \
+              $(MSDK_DIR)/Libraries/PeriphDrivers/Source/TPU/tpu_reva.o \
+              $(MSDK_DIR)/Libraries/PeriphDrivers/Source/SYS/sys_me14.o \
+              $(MSDK_DIR)/Libraries/PeriphDrivers/Source/SYS/mxc_delay.o
+      endif
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/maxim/max3266x.o
+    endif
+  endif
+
+  ifeq ($(TARGET),pic32cz)
+    ARCH_FLASH_OFFSET=0x08000000
+    CORTEX_M7=1
+    OBJS+=hal/pic32c.o
+
+    ifeq ($(WOLFHSM_CLIENT),1)
+      # Normally already resolved to an absolute path (and exported) by the
+      # top-level Makefile; this default only covers a standalone test-app make.
+      WOLFHSM_MICROCHIP_PIC32CZ ?= ..
+
+      CFLAGS+=-I$(WOLFHSM_MICROCHIP_PIC32CZ) \
+              -DWOLFHSM_CFG_NO_SYS_TIME \
+              -DWOLFHSM_CFG_TRANSPORT_MEM \
+              -DWOLFHSM_CFG_CLIENT_ID=WOLFBOOT_WOLFHSM_CLIENT_ID \
+              -DPIC32CZ_CFG_SHARED_MEM_PHYS_BASE=0x20100000U \
+              -DPIC32CZ_CFG_SHARED_MEM_REQ_SIZE=4096 \
+              -DPIC32CZ_CFG_SHARED_MEM_RESP_SIZE=4096 \
+              '-DPIC32CZ_CFG_SHARED_MEM_TOTAL_SIZE=(PIC32CZ_CFG_SHARED_MEM_REQ_SIZE+PIC32CZ_CFG_SHARED_MEM_RESP_SIZE)'
+
+      OBJS+=$(WOLFHSM_MICROCHIP_PIC32CZ)/port/mailbox.o \
+            $(WOLFHSM_MICROCHIP_PIC32CZ)/port/client/czhsm_client.o \
+            $(WOLFHSM_MICROCHIP_PIC32CZ)/port/client/fwmetadata.o \
+            $(WOLFBOOT_LIB_WOLFHSM)/src/wh_transport_mem.o
+
+      # HSM server firmware. Optional: set HSM_FW_BIN to have wolfBoot load/boot
+      # the HSM core from it at boot; leave it unset when the firmware is already
+      # resident and wolfBoot must not touch it.
+      ifneq ($(HSM_FW_BIN),)
+        ifeq ($(wildcard $(HSM_FW_BIN)),)
+          $(error HSM_FW_BIN=$(HSM_FW_BIN) not found: build the wolfHSM server \
+                  firmware before wolfBoot)
+        endif
+        HSM_FW_ADDR?=0x0c1c0000
+        HSM_FW_SIZE:=$(shell stat -c %s $(HSM_FW_BIN))
+        CFLAGS+=-DHSM_FW_ADDR=$(HSM_FW_ADDR) -DHSM_FW_SIZE=$(HSM_FW_SIZE)
+      endif
+
+      # Signing pubkey header. Optional: set HSM_PUBKEY_HEADER to have the HAL
+      # push the key into the HSM at boot; leave it unset when pre-provisioned.
+      ifneq ($(HSM_PUBKEY_HEADER),)
+        CFLAGS+=-DHSM_PUBKEY_HEADER='"$(HSM_PUBKEY_HEADER)"'
+      endif
+    endif
+  endif
+
+  ifeq ($(TARGET),pic32ck)
+    ARCH_FLASH_OFFSET=0x08000000
+    CORTEX_M33=1
+    OBJS+=hal/pic32c.o
+  endif
+
+  ifeq ($(TARGET),stm32l4)
+    SPI_TARGET=stm32
+    ARCH_FLASH_OFFSET=0x08000000
+    OBJS+=$(STM32CUBE)/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_flash.o
+    OBJS+=$(STM32CUBE)/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_flash_ex.o
+    CFLAGS+=-DSTM32L4A6xx -DUSE_HAL_DRIVER -Isrc -Ihal \
+      -I$(STM32CUBE)/Drivers/STM32L4xx_HAL_Driver/Inc/ \
+      -I$(STM32CUBE)/Drivers/BSP/STM32L4xx_Nucleo_144/ \
+      -I$(STM32CUBE)/Drivers/CMSIS/Device/ST/STM32L4xx/Include/ \
+      -I$(STM32CUBE)/Drivers/CMSIS/Include/
+  endif
+
+  ifeq ($(TARGET),stm32f7)
+    CORTEX_M7=1
+    ARCH_FLASH_OFFSET=0x08000000
+    SPI_TARGET=stm32
+  endif
+
+  ifeq ($(TARGET),stm32h7)
+    CORTEX_M7=1
+    ARCH_FLASH_OFFSET=0x08000000
+    SPI_TARGET=stm32
+  endif
+
+  # STM32H7S/H7R: wolfBoot runs from the 64 KB internal flash and keeps
+  # all three partitions on an external Octo-SPI NOR reached over XSPI2.
+  # The HAL implements ext_flash_* directly, so OCTOSPI_FLASH is left off:
+  # setting it would alias ext_flash_* onto src/qspi_flash.c, whose
+  # transfer helper disables the controller on every command.
+  ifeq ($(TARGET),stm32h7s)
+    CORTEX_M7=1
+    CFLAGS+=-Ihal
+    ARCH_FLASH_OFFSET=0x08000000
+    WOLFBOOT_ORIGIN=0x08000000
+    EXT_FLASH=1
+    PART_UPDATE_EXT=1
+    PART_SWAP_EXT=1
+    # hal_init() takes PLL1 to 600 MHz and drives the XSPI2 kernel clock
+    # from PLL2. Set STM32H7S_HSI_ONLY=1 to stay on the 64 MHz HSI reset
+    # clock instead, which is a smaller thing to debug during bring-up.
+    STM32H7S_HSI_ONLY?=0
+    CFLAGS+=-DSTM32H7S_HSI_ONLY=$(STM32H7S_HSI_ONLY)
+  endif
+
+  # Defaults for linker script placeholders (overridden when WOLFHAL=1)
+  WOLFHAL_FLASH_EXCLUDE_TEXT?=*(.text*)
+  WOLFHAL_FLASH_EXCLUDE_RODATA?=*(.rodata*)
+  WOLFHAL_FLASH_RAM_SECTIONS?=
+
+  ifeq ($(TARGET),stm32wb)
+    ARCH_FLASH_OFFSET=0x08000000
+    SPI_TARGET=stm32
+    ifneq ($(PKA),0)
+      PKA_EXTRA_OBJS+= $(STM32CUBE)/Drivers/STM32WBxx_HAL_Driver/Src/stm32wbxx_hal_pka.o $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/st/stm32.o
+      PKA_EXTRA_CFLAGS+=-DWOLFSSL_STM32WB -DWOLFSSL_STM32_PKA -DWOLFSSL_STM32_CUBEMX -DNO_STM32_HASH -DSTM32WB55xx
+      PKA_EXTRA_CFLAGS+=-Isrc -Ihal \
+          -I$(STM32CUBE)/Drivers/STM32WBxx_HAL_Driver/Inc \
+          -I$(STM32CUBE)/Drivers/BSP/P-NUCLEO-WB55.Nucleo/ \
+          -I$(STM32CUBE)/Drivers/CMSIS/Device/ST/STM32WBxx/Include \
+          -I$(STM32CUBE)/Drivers/STM32WBxx_HAL_Driver/Inc \
+          -I$(STM32CUBE)/Drivers/CMSIS/Include
+    endif
+  endif
+
+  ifeq ($(TARGET),stm32wba)
+    CORTEX_M33=1
+    ARCH_FLASH_OFFSET=0x08000000
+    SPI_TARGET=stm32
+  endif
+
+  ifeq ($(TARGET),stm32l5)
+    CORTEX_M33=1
+    CFLAGS+=-Ihal
+    ARCH_FLASH_OFFSET=0x08000000
+    ifeq ($(TZEN),1)
+      WOLFBOOT_ORIGIN=0x0C000000
+    else
+      WOLFBOOT_ORIGIN=0x08000000
+      LSCRIPT_IN=hal/$(TARGET)-ns.ld
+    endif
+  endif
+
+  ifeq ($(TARGET),stm32u5)
+    CORTEX_M33=1
+    CFLAGS+=-Ihal
+    ARCH_FLASH_OFFSET=0x08000000
+    ifeq ($(TZEN),1)
+      WOLFBOOT_ORIGIN=0x0C000000
+    else
+      WOLFBOOT_ORIGIN=0x08000000
+      LSCRIPT_IN=hal/$(TARGET)-ns.ld
+    endif
+    SPI_TARGET=stm32
+  endif
+
+  ifeq ($(TARGET),stm32u3)
+    CORTEX_M33=1
+    CFLAGS+=-Ihal
+    ARCH_FLASH_OFFSET=0x08000000
+    WOLFBOOT_ORIGIN=0x08000000
+    LSCRIPT_IN=hal/$(TARGET).ld
+    SPI_TARGET=stm32
+  endif
+
+  ifeq ($(TARGET),stm32c5)
+    CORTEX_M33=1
+    CFLAGS+=-Ihal
+    ARCH_FLASH_OFFSET=0x08000000
+    WOLFBOOT_ORIGIN=0x08000000
+    LSCRIPT_IN=hal/$(TARGET).ld
+    SPI_TARGET=stm32
+  endif
+
+  ifeq ($(TARGET),psoc_c3)
+    CORTEX_M33=1
+    CFLAGS+=-Ihal
+    # Code executes from the Secure CBUS alias; the BootROM flash API is
+    # reached through the Secure SBUS alias, which the HAL derives from it.
+    ARCH_FLASH_OFFSET=0x12000000
+    WOLFBOOT_ORIGIN=0x12000000
+    LSCRIPT_IN=hal/$(TARGET).ld
+    SPI_TARGET=psoc_c3
+    # Board wiring. Defaults match the PSOC Control C3 evaluation kit; override
+    # for another variant.
+    PSOC_C3_UART_SCB?=3
+    PSOC_C3_UART_PORT?=6
+    PSOC_C3_UART_PCLK_GR?=4
+    PSOC_C3_UART_PCLK_IDX?=6
+    PSOC_C3_PCLK_HZ?=48000000
+    PSOC_C3_SPI_SCB?=2
+    PSOC_C3_SPI_PORT?=7
+    PSOC_C3_SPI_HSIOM_SEL?=17
+    CFLAGS+=-DPSOC_C3_UART_SCB=$(PSOC_C3_UART_SCB)
+    CFLAGS+=-DPSOC_C3_UART_PORT=$(PSOC_C3_UART_PORT)
+    CFLAGS+=-DPSOC_C3_UART_PCLK_GR=$(PSOC_C3_UART_PCLK_GR)
+    CFLAGS+=-DPSOC_C3_UART_PCLK_IDX=$(PSOC_C3_UART_PCLK_IDX)
+    CFLAGS+=-DPSOC_C3_PCLK_HZ=$(PSOC_C3_PCLK_HZ)
+    CFLAGS+=-DPSOC_C3_SPI_SCB=$(PSOC_C3_SPI_SCB)
+    CFLAGS+=-DPSOC_C3_SPI_PORT=$(PSOC_C3_SPI_PORT)
+    CFLAGS+=-DPSOC_C3_SPI_HSIOM_SEL=$(PSOC_C3_SPI_HSIOM_SEL)
+    # I2C: SCB0 on P9.0 (SCL) and P9.2 (SDA), HSIOM selector 15.
+    PSOC_C3_I2C_SCB?=0
+    PSOC_C3_I2C_PORT?=9
+    PSOC_C3_I2C_SCL_PIN?=0
+    PSOC_C3_I2C_SDA_PIN?=2
+    PSOC_C3_I2C_HSIOM_SEL?=15
+    PSOC_C3_I2C_HZ?=100000
+    PSOC_C3_TPM_SEL_PORT?=7
+    PSOC_C3_TPM_SEL_PIN?=7
+    CFLAGS+=-DPSOC_C3_TPM_SEL_PORT=$(PSOC_C3_TPM_SEL_PORT)
+    CFLAGS+=-DPSOC_C3_TPM_SEL_PIN=$(PSOC_C3_TPM_SEL_PIN)
+    CFLAGS+=-DPSOC_C3_I2C_SCB=$(PSOC_C3_I2C_SCB)
+    CFLAGS+=-DPSOC_C3_I2C_PORT=$(PSOC_C3_I2C_PORT)
+    CFLAGS+=-DPSOC_C3_I2C_SCL_PIN=$(PSOC_C3_I2C_SCL_PIN)
+    CFLAGS+=-DPSOC_C3_I2C_SDA_PIN=$(PSOC_C3_I2C_SDA_PIN)
+    CFLAGS+=-DPSOC_C3_I2C_HSIOM_SEL=$(PSOC_C3_I2C_HSIOM_SEL)
+    CFLAGS+=-DPSOC_C3_I2C_HZ=$(PSOC_C3_I2C_HZ)
+  endif
+  ifeq ($(TARGET),m2354)
+    CORTEX_M23=1
+    CFLAGS+=-Ihal
+    ARCH_FLASH_OFFSET=0x00000000
+    WOLFBOOT_ORIGIN=0x00000000
+    ifneq ($(TZEN),1)
+      LSCRIPT_IN=hal/$(TARGET)-ns.ld
+    endif
+  endif
+
+  ifeq ($(TARGET),stm32h5)
+    CORTEX_M33=1
+    CFLAGS+=-Ihal
+    ARCH_FLASH_OFFSET=0x08000000
+    ifeq ($(TZEN),1)
+      WOLFBOOT_ORIGIN=0x0C000000
+    else
+      WOLFBOOT_ORIGIN=0x08000000
+      LSCRIPT_IN=hal/$(TARGET)-ns.ld
+    endif
+    SPI_TARGET=stm32
+    ifneq ($(DEBUG),0)
+        CFLAGS+=-DPKCS11_SMALL
+    endif
+
+  endif
+
+  ifeq ($(TARGET),stm32n6)
+    CORTEX_M55=1
+    CFLAGS+=-Ihal
+    ARCH_FLASH_OFFSET=0x70000000
+    # Boot ROM copies FSBL from NOR to AXISRAM2 at 0x34180400.
+    # The signing -la flag in the flash script must match.
+    WOLFBOOT_ORIGIN=0x34180400
+    EXT_FLASH=1
+    PART_UPDATE_EXT=1
+    PART_SWAP_EXT=1
+  endif
+
+  ifeq ($(TARGET),rp2350)
+    CORTEX_M33=1
+    CFLAGS+=-Ihal
+    ARCH_FLASH_OFFSET=0x10000000
+    WOLFBOOT_ORIGIN=0x10000000
+    ifeq ($(TZEN),1)
+      LSCRIPT_IN=hal/$(TARGET).ld
+    else
+      LSCRIPT_IN=hal/$(TARGET)-ns.ld
+    endif
+    SPI_TARGET=raspberrypi_pico
+    CFLAGS+=-DPICO_SDK_PATH=$(PICO_SDK_PATH)
+    CFLAGS+=-I$(PICO_SDK_PATH)/src/common/pico_stdlib_headers/include
+  endif
+
+  ifeq ($(TARGET),rtl8735b)
+     # RealTek RTL8735B SoC (Cortex-M33), e.g. the AmebaPro2 EVB. wolfBoot is
+     # staged into SRAM by the RealTek bootloader and copies the verified app
+     # from external SPI NOR into DDR before jumping (src/update_ram.c RAMBOOT).
+     CORTEX_M33=1
+     CFLAGS+=-Ihal
+     # ASDK 10.3.0 toolchain (system arm-none-eabi-gcc clashes on newlib/lwip).
+     CROSS_COMPILE:=$(ASDK_PATH)/arm-none-eabi-
+     # Match the RealTek SDK FPU/ABI (-mfpu=fpv5-sp-d16 -mfloat-abi=softfp) so
+     # linking the SDK libraries is consistent; wolfBoot enables the FPU at
+     # hal_init before any SDK code runs.
+     CFLAGS+=-mfpu=fpv5-sp-d16 -mfloat-abi=softfp
+     LDFLAGS+=-mfpu=fpv5-sp-d16 -mfloat-abi=softfp
+     UPDATE_OBJS:=src/update_ram.o
+     CFLAGS+=-DWOLFBOOT_DUALBOOT
+     CFLAGS+=-ffunction-sections -fdata-sections
+     LDFLAGS+=-Wl,--gc-sections
+     # Flash/UART/cache backend: "sdk" (default, RealTek SDK drivers) or "bare"
+     # (smaller, no SDK dependency -- not yet implemented). See hal/rtl8735b.c.
+     HAL_BACKEND?=sdk
+     ifeq ($(HAL_BACKEND),sdk)
+       CFLAGS+=-DHAL_BACKEND_SDK
+       # The SDK backend folds the RealTek SDK driver chain into hal/rtl8735b.o.
+       # Its objects.h pulls the SDK's "hal.h" (defines flash_t,
+       # hal_audio_adapter_t, ...); wolfBoot also ships "hal.h". hal/rtl8735b.c
+       # does not include wolfBoot's hal.h, and the SDK dirs are passed with
+       # -iquote (searched before the global -I for quoted includes) so the SDK
+       # objects.h "hal.h" resolves to the SDK one for THIS object only. sdk-shim
+       # supplies a stub cmsis_os.h so the chain does not pull CMSIS-OS/FreeRTOS
+       # (wolfBoot never calls it). The CONFIG_* defines mirror the bare-metal
+       # bootloader build; -mcmse satisfies the SDK cache header (SCB_NS). The
+       # rest of wolfBoot stays plain M33.
+       HAL_SDK_IQUOTE=-iquote $(WOLFBOOT_ROOT)/hal/rtl8735b/sdk-shim \
+               -iquote $(AMEBA_SDK)/component/mbed/hal_ext \
+               -iquote $(AMEBA_SDK)/component/mbed/hal \
+               -iquote $(AMEBA_SDK)/component/mbed/api \
+               -iquote $(AMEBA_SDK)/component/mbed/targets/hal/rtl8735b \
+               -iquote $(AMEBA_SDK)/component/soc/8735b/fwlib/rtl8735b/include \
+               -iquote $(AMEBA_SDK)/component/soc/8735b/fwlib/rtl8735b/lib/include \
+               -iquote $(AMEBA_SDK)/component/soc/8735b/cmsis/rtl8735b/include \
+               -iquote $(AMEBA_SDK)/component/soc/8735b/cmsis/rtl8735b/lib/include \
+               -iquote $(AMEBA_SDK)/component/soc/8735b/cmsis/cmsis-core/include \
+               -iquote $(AMEBA_SDK)/component/soc/8735b/app/rtl_printf/include \
+               -iquote $(AMEBA_SDK)/component/soc/8735b/app/stdio_port \
+               -iquote $(AMEBA_SDK)/component/soc/8735b/misc/utilities/include \
+               -iquote $(AMEBA_SDK)/component/os/os_dep/include
+       # The same dirs as plain -I too, so angle-bracket includes (e.g. some
+       # CMSIS-Core headers) resolve; -iquote only covers quoted includes.
+       HAL_SDK_INC=$(patsubst -iquote,-I,$(HAL_SDK_IQUOTE))
+       HAL_SDK_DEFS=-DCONFIG_PLATFORM_8735B -DCONFIG_RTL8735B_PLATFORM=1 \
+               -DCONFIG_BUILD_RAM=1
+       hal/rtl8735b.o: CFLAGS += $(HAL_SDK_IQUOTE) $(HAL_SDK_INC) $(HAL_SDK_DEFS) -mcmse
+       # Final link also needs the SDK fwlib + ROM symbol table; point at the
+       # prebuilt SDK lib/objects and ROM symbol linker file during bring-up:
+       #   make TARGET=rtl8735b LIBS+=... LDFLAGS_EXTRA="-T<rom_symbol.ld>"
+     else
+       CFLAGS+=-DHAL_BACKEND_BARE
+     endif
+  endif
+
+  ifeq ($(TARGET),sama5d3)
+     CORTEX_A5=1
+     UPDATE_OBJS:=src/update_ram.o
+     CFLAGS+=-DWOLFBOOT_DUALBOOT -DEXT_FLASH -DNAND_FLASH -fno-builtin -ffreestanding
+     CFLAGS+=-DWOLFBOOT_USE_STDLIBC
+  endif
+
+  ifeq ($(TARGET),zynq7000)
+     # AMD/Xilinx Zynq-7000 (Cortex-A9, ARMv7-A) - ZC702 Evaluation Kit.
+     # Loaded by Xilinx FSBL into DDR; see hal/zynq7000.{c,h,ld}.
+     CORTEX_A9=1
+     UPDATE_OBJS:=src/update_ram.o
+     CFLAGS+=-DWOLFBOOT_DUALBOOT -fno-builtin -ffreestanding
+     # Do NOT define WOLFBOOT_USE_STDLIBC: newlib's memcpy uses unaligned
+     # LDRs which fault on ARMv7-A whenever the active mapping treats memory
+     # as Strongly-Ordered (typically MMU off, but also some boot-stage
+     # configurations). wolfBoot's startup keeps FSBL's MMU + flat 1:1
+     # mapping enabled to avoid that, but we still link against the
+     # aligned-safe memcpy in src/string.c so unaligned loads can never
+     # surprise us regardless of MMU state.
+     # Enable the legacy 64-byte uImage header strip unconditionally to
+     # match sibling Xilinx targets (zynqmp, versal). update_ram.c
+     # validates magic + ih_hcrc (header CRC32) + ih_size before
+     # stripping, so a non-uImage payload whose first 4 bytes happen to
+     # match UBOOT_IMG_HDR_MAGIC cannot be silently treated as a uImage
+     # -- the additional CRC32 + size checks drop the joint false-
+     # positive probability from ~2^-32 to ~2^-64, matching what U-Boot's
+     # own mkimage/bootm does.
+     CFLAGS+=-DWOLFBOOT_UBOOT_LEGACY
+     # FPGA bitstream-from-FIT is supported via the DevC/PCAP DMA engine
+     # (full bitstream). Enable with FPGA_BITSTREAM=1 (opt-in).
+  endif
+
+  ifeq ($(TARGET),va416x0)
+    CFLAGS+=-I$(WOLFBOOT_ROOT)/hal/vorago/ \
+            -I$(VORAGO_SDK_DIR)/common/drivers/hdr/ \
+            -I$(VORAGO_SDK_DIR)/common/mcu/hdr/ \
+            -I$(VORAGO_SDK_DIR)/common/utils/hdr/
+    SDK_OBJS=$(VORAGO_SDK_DIR)/common/drivers/src/va416xx_hal.o \
+             $(VORAGO_SDK_DIR)/common/drivers/src/va416xx_hal_spi.o \
+             $(VORAGO_SDK_DIR)/common/drivers/src/va416xx_hal_clkgen.o \
+             $(VORAGO_SDK_DIR)/common/drivers/src/va416xx_hal_ioconfig.o \
+             $(VORAGO_SDK_DIR)/common/drivers/src/va416xx_hal_irqrouter.o \
+             $(VORAGO_SDK_DIR)/common/drivers/src/va416xx_hal_uart.o \
+             $(VORAGO_SDK_DIR)/common/drivers/src/va416xx_hal_timer.o \
+             $(VORAGO_SDK_DIR)/common/mcu/src/system_va416xx.o
+    ifeq ($(USE_HAL_SPI_FRAM),1)
+      SDK_OBJS+=$(VORAGO_SDK_DIR)/common/utils/src/spi_fram.o
+      CFLAGS+=-DUSE_HAL_SPI_FRAM
+    endif
+    OBJS+=$(SDK_OBJS)
+  endif
+
+## Cortex CPU
+
+ifeq ($(CORTEX_A5),1)
+  FPU=-mfpu=vfp4-d16
+  CFLAGS+=-mcpu=cortex-a5  -mtune=cortex-a5 -static -z noexecstack \
+		  -mno-unaligned-access
+  LDLAGS+=-mcpu=cortex-a5 -mtune=cortex-a5  -mtune=cortex-a5 -static \
+          -z noexecstack  -Ttext 0x300000
+  # Cortex-A uses boot_arm32.o
+  OBJS+=src/boot_arm32.o src/boot_arm32_start.o
+  ifeq ($(NO_ASM),1)
+    MATH_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+  else
+    MATH_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_arm32.o
+    ifneq ($(NO_ARM_ASM),1)
+      OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/armv8-32-sha256-asm.o
+      OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/armv8-32-sha256-asm_c.o
+      CFLAGS+=-DWOLFSSL_SP_ARM32_ASM -DWOLFSSL_ARMASM -DWOLFSSL_ARMASM_NO_HW_CRYPTO \
+              -DWOLFSSL_ARM_ARCH=7 -DWOLFSSL_ARMASM_INLINE -DWOLFSSL_ARMASM_NO_NEON
+    endif
+  endif
+else
+ifeq ($(CORTEX_A9),1)
+  # Cortex-A9 (ARMv7-A, 32-bit) - Zynq-7000.
+  # Build in ARM state (-marm); reset vector lands in ARM mode after FSBL.
+  # Note: do not filter out -mthumb from CFLAGS/LDFLAGS - that converts the
+  # variables to simple-expansion flavor and breaks lazy $(LSCRIPT) expansion
+  # in test-app/Makefile. -marm appended later wins over -mthumb anyway.
+  FPU=-mfpu=vfp3-d16
+  CFLAGS+=-mcpu=cortex-a9 -mtune=cortex-a9 -marm -mno-unaligned-access
+  LDFLAGS+=-mcpu=cortex-a9 -mtune=cortex-a9 -marm -static \
+           -Wl,-z,noexecstack
+  # Cortex-A9 uses the same generic ARMv7-A startup as Cortex-A5
+  # (src/boot_arm32_start.S handles VBAR, per-mode stacks, cache
+  # invalidate, async-abort enable for any ARMv7-A target).
+  OBJS+=src/boot_arm32.o src/boot_arm32_start.o
+  # Linux/U-Boot payload: enable MMU + FDT codepaths in update_ram.c so DTBs
+  # can be loaded from a separate signed PART_DTS_BOOT partition. The MMU
+  # itself stays inherited from FSBL's flat 1:1 mapping; wolfBoot does not
+  # manage page tables on Cortex-A9.
+  ifeq ($(MMU),1)
+    CFLAGS+=-DMMU -DWOLFBOOT_FDT
+    OBJS+=src/fdt.o
+  endif
+  # CRC32 helpers in src/gpt.c are reused by update_ram.c's uImage header
+  # validator (WOLFBOOT_UBOOT_LEGACY), so link gpt.o for every Cortex-A9
+  # build, not just the disk-boot variant below.
+  OBJS+=src/gpt.o
+  # SD card / eMMC boot: swap the update_ram loader for update_disk + GPT.
+  # The SDHCI HAL hooks live in hal/zynq7000.c and translate the generic
+  # Cadence-layout driver to the Arasan SDHCI v2.0 controller.
+  ifneq ($(filter 1,$(DISK_SDCARD) $(DISK_EMMC)),)
+    CFLAGS+=-DWOLFBOOT_UPDATE_DISK -DMAX_DISKS=1
+    UPDATE_OBJS:=src/update_disk.o
+    OBJS += src/disk.o
+  endif
+  ifeq ($(NO_ASM),1)
+    MATH_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+  else
+    MATH_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_arm32.o
+    ifneq ($(NO_ARM_ASM),1)
+      OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/armv8-32-sha256-asm.o
+      OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/armv8-32-sha256-asm_c.o
+      CFLAGS+=-DWOLFSSL_SP_ARM32_ASM -DWOLFSSL_ARMASM -DWOLFSSL_ARMASM_NO_HW_CRYPTO \
+              -DWOLFSSL_ARM_ARCH=7 -DWOLFSSL_ARMASM_INLINE -DWOLFSSL_ARMASM_NO_NEON
+    endif
+  endif
+else
+  # All others use boot_arm.o
+  OBJS+=src/boot_arm.o
+  ifneq ($(NO_ARM_ASM),1)
+    CORTEXM_ARM_EXTRA_OBJS= \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-aes-asm.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-aes-asm_c.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-sha256-asm.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-sha256-asm_c.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-sha512-asm.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-sha512-asm_c.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-sha3-asm.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-sha3-asm_c.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-chacha-asm.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/arm/thumb2-chacha-asm_c.o
+
+    CORTEXM_ARM_EXTRA_CFLAGS+=-DWOLFSSL_ARMASM -DWOLFSSL_ARMASM_NO_HW_CRYPTO \
+                              -DWOLFSSL_ARMASM_NO_NEON -DWOLFSSL_ARMASM_THUMB2
+  endif
+  ifeq ($(CORTEX_M55),1)
+    CORTEX_M33=1
+    CFLAGS+=-mcpu=cortex-m55 -DCORTEX_M55
+    LDFLAGS+=-mcpu=cortex-m55
+  endif
+  ifeq ($(CORTEX_M23),1)
+    # wolfBoot's mpu_init() uses the ARMv7-M MPU_RASR model, which would
+    # mis-program the ARMv8-M MPU_RBAR/MPU_RLAR regions on this core.
+    ifneq ($(NO_MPU),1)
+      $(error CORTEX_M23 (ARMv8-M baseline) requires NO_MPU=1)
+    endif
+    CFLAGS+=-mcpu=cortex-m23 -DCORTEX_M23
+    LDFLAGS+=-mcpu=cortex-m23
+    # ARMv8-M baseline is Thumb-1 only: none of the Thumb-2 assembly in
+    # CORTEXM_ARM_EXTRA_OBJS will assemble for this core.
+    CORTEXM_ARM_EXTRA_OBJS=
+    CORTEXM_ARM_EXTRA_CFLAGS=
+    ifeq ($(TZEN),1)
+      # ARMv8-M baseline has the Security Extension, so the same TrustZone
+      # machinery as CORTEX_M33 applies. Kept separate from the M33 block so
+      # that adding this arm cannot change any existing target.
+      CFLAGS+=-mcmse
+      SECURE_LDFLAGS+=-Wl,--cmse-implib -Wl,--out-implib=./src/wolfboot_tz_nsc.o
+      ifeq ($(WOLFCRYPT_TZ),1)
+        SECURE_OBJS+=./src/wc_callable.o
+        WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/random.o
+        CFLAGS+=-DWOLFCRYPT_SECURE_MODE
+      endif
+    endif # TZEN=1
+    ifeq ($(SPMATH),1)
+      ifeq ($(NO_ASM),1)
+        MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+      else
+        # Same SP tier as Cortex-M0: Thumb-1. sp_cortexm.o is Thumb-2 and
+        # will not assemble here. No ARMASM support for ARMv8-M baseline.
+        CFLAGS+=-DWOLFSSL_SP_ASM -DWOLFSSL_SP_ARM_THUMB_ASM
+        MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_armthumb.o
+      endif
+    endif
+  else
+  ifeq ($(CORTEX_M33),1)
+    CFLAGS+=-DCORTEX_M33
+    ifneq ($(CORTEX_M55),1)
+      CFLAGS+=-mcpu=cortex-m33
+      LDFLAGS+=-mcpu=cortex-m33
+    endif
+    ifeq ($(TZEN),1)
+      ifneq (,$(findstring stm32,$(TARGET)))
+        ifneq ($(TARGET),stm32n6)
+          OBJS+=hal/stm32_tz.o
+        endif
+      endif
+      CFLAGS+=-mcmse
+      SECURE_LDFLAGS+=-Wl,--cmse-implib -Wl,--out-implib=./src/wolfboot_tz_nsc.o
+      ifeq ($(WOLFCRYPT_TZ),1)
+        CORTEXM_ARM_EXTRA_OBJS=
+        CORTEXM_ARM_EXTRA_CFLAGS=
+        SECURE_OBJS+=./src/wc_callable.o
+        WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/random.o
+        CFLAGS+=-DWOLFCRYPT_SECURE_MODE
+      endif
+    endif # TZEN=1
+      ifeq ($(SPMATH),1)
+        ifeq ($(NO_ASM),1)
+          MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+        else
+          CFLAGS+=-DWOLFSSL_SP_ASM -DWOLFSSL_SP_ARM_CORTEX_M_ASM
+          MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_cortexm.o
+          CFLAGS+=$(CORTEXM_ARM_EXTRA_CFLAGS) -DWOLFSSL_ARM_ARCH=8
+          OBJS+=$(CORTEXM_ARM_EXTRA_OBJS)
+        endif
+      endif
+    else
+    ifeq ($(CORTEX_M7),1)
+      CFLAGS+=-mcpu=cortex-m7
+      LDFLAGS+=-mcpu=cortex-m7
+      ifeq ($(SPMATH),1)
+        ifeq ($(NO_ASM),1)
+          MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+        else
+          CFLAGS+=-DWOLFSSL_SP_ASM -DWOLFSSL_SP_ARM_CORTEX_M_ASM
+          MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_cortexm.o
+          CFLAGS+=$(CORTEXM_ARM_EXTRA_CFLAGS) -DWOLFSSL_ARM_ARCH=7
+          OBJS+=$(CORTEXM_ARM_EXTRA_OBJS)
+        endif
+       endif
+    else
+    ifeq ($(CORTEX_M0),1)
+        CFLAGS+=-mcpu=cortex-m0
+        LDFLAGS+=-mcpu=cortex-m0
+        ifeq ($(SPMATH),1)
+          ifeq ($(NO_ASM),1)
+            MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+          else
+            CFLAGS+=-DWOLFSSL_SP_ASM -DWOLFSSL_SP_ARM_THUMB_ASM
+            MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_armthumb.o
+            # No ARMASM support available for ARMv6-M.
+          endif
+        endif
+      else
+        ifeq ($(CORTEX_M3),1)
+          CFLAGS+=-mcpu=cortex-m3
+          LDFLAGS+=-mcpu=cortex-m3
+          ifeq ($(NO_ASM),1)
+            ifeq ($(SPMATH),1)
+              MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+            endif
+          else
+            ifeq ($(SPMATH),1)
+              CFLAGS+=-DWOLFSSL_SP_ASM -DWOLFSSL_SP_ARM_CORTEX_M_ASM -DWOLFSSL_SP_NO_UMAAL
+              MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_cortexm.o
+              CFLAGS+=$(CORTEXM_ARM_EXTRA_CFLAGS) -DWOLFSSL_ARM_ARCH=7
+              OBJS+=$(CORTEXM_ARM_EXTRA_OBJS)
+            endif
+          endif
+      else
+        # default Cortex M4
+        CFLAGS+=-mcpu=cortex-m4
+        LDFLAGS+=-mcpu=cortex-m4
+        ifeq ($(NO_ASM),1)
+          ifeq ($(SPMATH),1)
+            MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+          endif
+        else
+          CFLAGS+=-fomit-frame-pointer # required with debug builds only
+          ifeq ($(SPMATH),1)
+            CFLAGS+=-DWOLFSSL_SP_ASM -DWOLFSSL_SP_ARM_CORTEX_M_ASM
+            MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_cortexm.o
+            CFLAGS+=$(CORTEXM_ARM_EXTRA_CFLAGS) -DWOLFSSL_ARM_ARCH=7
+            OBJS+=$(CORTEXM_ARM_EXTRA_OBJS)
+          endif
+        endif
+      endif
+    endif
+  endif
+endif
+endif
+endif
+endif
+endif
+
+ifeq ($(WOLFHAL),1)
+  WOLFHAL_ROOT?=$(WOLFBOOT_ROOT)/lib/wolfHAL
+  CFLAGS+=-I$(WOLFHAL_ROOT) -Ihal/boards/$(BOARD)
+endif
+
+
+## Renesas RX
+ifeq ($(ARCH),RENESAS_RX)
+  RX_GCC_PATH?=~/toolchains/gcc_8.3.0.202311_rx_elf
+  CROSS_COMPILE?=$(RX_GCC_PATH)/bin/rx-elf-
+
+  ## Toolchain setup
+  ifeq ($(USE_GCC),0)
+    CC=$(CROSS_COMPILE)gcc
+    # Must use LD directly (gcc link calls LD with sysroot and is not supported)
+    LD=$(CROSS_COMPILE)ld
+    AS=$(CROSS_COMPILE)gcc
+    AR=$(CROSS_COMPILE)ar
+    OBJCOPY?=$(CROSS_COMPILE)objcopy
+    SIZE=$(CROSS_COMPILE)size
+
+    # Override flags
+    USE_GCC_HEADLESS=0
+    LD_START_GROUP=--start-group
+    LD_END_GROUP=--end-group
+    CFLAGS+=-Wall -Wextra -ffreestanding -Wno-unused -nostartfiles -fno-common
+    CFLAGS+=-ffunction-sections -fdata-sections
+    CFLAGS+=-B$(dir $(CROSS_COMPILE))
+    LDFLAGS+=-gc-sections -Map=wolfboot.map
+    LDFLAGS+=-T $(LSCRIPT)
+  endif
+
+  # Renesas specific files
+  OBJS+=src/boot_renesas.o src/boot_renesas_start.o hal/renesas-rx.o
+  ifeq ($(SPMATH),1)
+    MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+  endif
+
+  # RX parts support big or little endian data depending on MDE register
+  CFLAGS+=-fomit-frame-pointer -nofpu
+  ifeq ($(BIG_ENDIAN),1)
+    CFLAGS+=-mbig-endian-data
+    ifeq ($(USE_GCC),1)
+      LDFLAGS+=-Wl,--oformat=elf32-rx-be
+      CFLAGS+=-misa=v2
+    else
+      LDFLAGS+=--oformat=elf32-rx-be
+    endif
+  else
+    CFLAGS+=-mlittle-endian-data
+    ifeq ($(USE_GCC),1)
+      LDFLAGS+=-Wl,--oformat=elf32-rx-le
+      CFLAGS+=-misa=v2
+    else
+      LDFLAGS+=--oformat=elf32-rx-le
+    endif
+  endif
+
+  # ld is invoked directly, so add libgcc for the selected multilib (GNU RX
+  # stores it per-endianness/-nofpu under lib/gcc/..., not in ../lib).
+  ifeq ($(USE_GCC),0)
+    LIBS+=$(shell $(CC) $(CFLAGS) -print-libgcc-file-name)
+  endif
+
+  ifeq ($(PKA),1)
+    CFLAGS+=-DWOLFBOOT_RENESAS_TSIP
+    CFLAGS+=-DWOLFBOOT_DEVID_PUBKEY=7890
+    CFLAGS+=-DWOLFBOOT_DEVID_CRYPT=7891
+    # GCC RX 14.2 -Werror=enum-conversion trips on the wolfSSL TSIP port; add
+    # the relaxation only if the compiler knows the warning (RX 8.3 does not).
+    CFLAGS+=$(shell echo '' | $(CC) -xc -fsyntax-only \
+        -Wno-error=enum-conversion - >/dev/null 2>&1 && echo -Wno-error=enum-conversion)
+    RX_DRIVER_PATH?=./lib
+
+    OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/cryptocb.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/Renesas/renesas_common.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/Renesas/renesas_tsip_util.o \
+          $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/Renesas/renesas_tsip_aes.o
+
+    # RX TSIP uses pre-compiled .a library by default
+    ifneq ($(RX_TSIP_SRC),1)
+      ifeq ($(TARGET),rx65n)
+        ifeq ($(BIG_ENDIAN),1)
+          LIBS+=$(RX_DRIVER_PATH)/r_tsip_rx/lib/gcc/libr_tsip_rx65n_big.a
+        else
+          LIBS+=$(RX_DRIVER_PATH)/r_tsip_rx/lib/gcc/libr_tsip_rx65n_little.a
+        endif
+      endif
+      ifeq ($(TARGET),rx72n)
+        ifeq ($(BIG_ENDIAN),1)
+          LIBS+=$(RX_DRIVER_PATH)/r_tsip_rx/lib/gcc/libr_tsip_rx72m_rx72n_rx66n_big.a
+        else
+          LIBS+=$(RX_DRIVER_PATH)/r_tsip_rx/lib/gcc/libr_tsip_rx72m_rx72n_rx66n_little.a
+        endif
+      endif
+    else
+      CFLAGS+=-DRX_TSIP_SRC
+      ifeq ($(TARGET),rx65n)
+        RX_TSIP_SRC_PATH?=$(RX_DRIVER_PATH)/r_tsip_rx/src/targets/rx65n
+      endif
+      ifeq ($(TARGET),rx72n)
+        RX_TSIP_SRC_PATH?=$(RX_DRIVER_PATH)/r_tsip_rx/src/targets/rx72m_rx72n_rx66n
+      endif
+      # Use RX_TSIP_SRC if building TSIP sources directly
+      OBJS+=$(RX_TSIP_SRC_PATH)/r_tsip_rx.o \
+            $(RX_TSIP_SRC_PATH)/r_tsip_rx_private.o \
+            $(RX_TSIP_SRC_PATH)/r_tsip_aes_rx.o \
+            $(RX_TSIP_SRC_PATH)/r_tsip_hash_rx.o \
+            $(RX_TSIP_SRC_PATH)/r_tsip_ecc_rx.o \
+            $(RX_TSIP_SRC_PATH)/ip/s_flash.o \
+            $(patsubst %.c,%.o,$(wildcard $(RX_TSIP_SRC_PATH)/ip/r_tsip_rx_p*.c)) \
+            $(patsubst %.c,%.o,$(wildcard $(RX_TSIP_SRC_PATH)/ip/r_tsip_rx_subprc*.c)) \
+            $(patsubst %.c,%.o,$(wildcard $(RX_TSIP_SRC_PATH)/ip/r_tsip_rx_function*.c))
+
+      # Ignore sign compare warnings in TSIP RX driver
+      CFLAGS+=-Wno-error=sign-compare
+    endif
+
+    OBJS+=$(RX_DRIVER_PATH)/r_bsp/mcu/all/r_bsp_cpu.o \
+          $(RX_DRIVER_PATH)/r_bsp/mcu/all/r_bsp_interrupts.o \
+          $(RX_DRIVER_PATH)/r_bsp/mcu/all/r_rx_intrinsic_functions.o
+    ifeq ($(TARGET),rx65n)
+      OBJS+=$(RX_DRIVER_PATH)/r_bsp/mcu/rx65n/mcu_interrupts.o
+    endif
+    ifeq ($(TARGET),rx72n)
+      OBJS+=$(RX_DRIVER_PATH)/r_bsp/mcu/rx72n/mcu_interrupts.o
+    endif
+
+    CFLAGS+=-Ihal -I$(WOLFBOOT_LIB_WOLFSSL) \
+            -I$(RX_DRIVER_PATH)/r_bsp \
+            -I$(RX_DRIVER_PATH)/r_config \
+            -I$(RX_DRIVER_PATH)/r_tsip_rx \
+            -I$(RX_DRIVER_PATH)/r_tsip_rx/src
+  endif
+endif
+
+
+## RISCV (32-bit)
+ifeq ($(ARCH),RISCV)
+  CROSS_COMPILE?=riscv32-unknown-elf-
+  # GCC 12+ separated _zicsr (CSR instructions) and _zifencei (fence.i)
+  # from the base "I" extension, requiring them to be listed explicitly in
+  # the -march string.  Detect with compile-only tests (-c).
+  #
+  # IMPORTANT: these extensions are added to CFLAGS only (compilation).
+  # They must NOT appear in LDFLAGS because GCC 15 decomposes the ISA
+  # string (m→zmmul, a→zaamo+zalrsc, c→zca) producing an expanded
+  # -march that has no matching multilib, causing a fatal error at
+  # link time.  The base march is multilib-safe for all GCC versions.
+  RISCV32_ZICSR := $(shell echo "void _start(void){}" | \
+    $(CROSS_COMPILE)gcc -march=rv32imac_zicsr -mabi=ilp32 -c -x c - -o /dev/null 2>/dev/null && echo _zicsr)
+  RISCV32_ZIFENCEI := $(shell echo "void _start(void){}" | \
+    $(CROSS_COMPILE)gcc -march=rv32imac_zifencei -mabi=ilp32 -c -x c - -o /dev/null 2>/dev/null && echo _zifencei)
+  CFLAGS+=-fno-builtin-printf -DUSE_M_TIME -g -nostartfiles -DARCH_RISCV
+  # Compilation: extended march so assembler accepts CSR/fence.i
+  CFLAGS+=-march=rv32imac$(RISCV32_ZICSR)$(RISCV32_ZIFENCEI) -mabi=ilp32 -mcmodel=medany
+  # Linking: base march (no extension suffixes) for multilib lookup
+  LDFLAGS+=-march=rv32imac -mabi=ilp32 -mcmodel=medany
+  MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+
+  # Prune unused functions and data
+  CFLAGS +=-ffunction-sections -fdata-sections
+  LDFLAGS+=-Wl,--gc-sections
+
+  # Unified RISC-V boot code (32/64-bit via __riscv_xlen)
+  OBJS+=src/boot_riscv_start.o src/boot_riscv.o src/vector_riscv.o
+  ARCH_FLASH_OFFSET=0x20010000
+endif
+
+## RISCV64 (64-bit)
+ifeq ($(ARCH),RISCV64)
+  CROSS_COMPILE?=riscv64-unknown-elf-
+
+  # M-mode vs S-mode configuration
+  ifeq ($(RISCV_MMODE),1)
+    # Machine Mode: Running directly from eNVM/L2 SRAM
+    CFLAGS+=-DWOLFBOOT_RISCV_MMODE -DWOLFBOOT_DUALBOOT
+    # Minimal SBI runtime: services S-mode ecalls / timer / IPI when booting
+    # an S-mode OS (Linux).  Only built when WOLFBOOT_MMODE_SMODE_BOOT is set
+    # (the file is an empty translation unit otherwise -- see src/riscv_sbi.c).
+    ifneq (,$(findstring WOLFBOOT_MMODE_SMODE_BOOT,$(CFLAGS_EXTRA) $(CFLAGS)))
+      OBJS+=src/riscv_sbi.o
+    endif
+    # Use M-mode specific linker script
+    LSCRIPT_IN:=hal/$(TARGET)-m.ld
+    # MPFS DDR init pulls LIBERO_SETTING_* values from a Libero/HSS-generated
+    # fpga_design_config.h. Setting LIBERO_FPGA_CONFIG_DIR enables DDR init
+    # and adds the directory to the include search path.
+    ifneq ($(LIBERO_FPGA_CONFIG_DIR),)
+      CFLAGS+=-DMPFS_DDR_INIT -I$(LIBERO_FPGA_CONFIG_DIR)
+      # Generic Cadence DDR controller driver + the MPFS PHY/PLL/training
+      # platform (split out of hal/mpfs250.c).
+      OBJS+=src/ddr_cadence.o
+      OBJS+=hal/mpfs250_ddr.o
+      # FIT/FDT boot: the E51 M-mode DDR boot loads a signed Yocto fitImage
+      # (kernel + dtb) from SD and hands the dtb to S-mode Linux, so enable
+      # the FIT parser (fit_find_images/fit_load_image in src/fdt.c).  The
+      # U54 S-mode build enables this in the RISCV_MMODE=0 branch below; the
+      # E51 M-mode DDR build needs it here too (it is not full MMU, so the
+      # do_boot dtb hand-off is gated on MMU || WOLFBOOT_FDT).
+      CFLAGS+=-DWOLFBOOT_FDT
+      OBJS+=src/fdt.o
+    endif
+  else
+    # Supervisor Mode: Running under HSS
+    CFLAGS+=-DWOLFBOOT_DUALBOOT
+    ifeq ($(MPFS_L2LIM),1)
+      # L2-LIM mode: wolfBoot in on-chip SRAM, loaded by HSS (no DDR)
+      LSCRIPT_IN:=hal/$(TARGET)-hss.ld
+    else
+      # DDR mode (default): full MMU and FDT support
+      CFLAGS+=-DMMU
+    endif
+  endif
+
+  # If SD card or eMMC is enabled use update_disk loader with GPT support
+  ifneq ($(filter 1,$(DISK_SDCARD) $(DISK_EMMC)),)
+    CFLAGS+=-DWOLFBOOT_UPDATE_DISK -DMAX_DISKS=1
+    UPDATE_OBJS:=src/update_disk.o
+    OBJS += src/gpt.o
+    OBJS += src/disk.o
+  else
+    # Use RAM-based update path for non-memory-mapped flash (SC SPI)
+    # Images are loaded into RAM before execution
+    UPDATE_OBJS?=src/update_ram.o
+  endif
+
+  # GCC 12+ extension detection (see RISCV 32-bit section above).
+  # Extensions go in CFLAGS only; LDFLAGS uses the base march to avoid
+  # GCC 15 multilib lookup failures from ISA string decomposition.
+  RISCV64_ZICSR := $(shell echo "void _start(void){}" | \
+    $(CROSS_COMPILE)gcc -march=rv64imafd_zicsr -mabi=lp64d -c -x c - -o /dev/null 2>/dev/null && echo _zicsr)
+  RISCV64_ZIFENCEI := $(shell echo "void _start(void){}" | \
+    $(CROSS_COMPILE)gcc -march=rv64imafd_zifencei -mabi=lp64d -c -x c - -o /dev/null 2>/dev/null && echo _zifencei)
+
+  ifeq ($(RISCV_MMODE),1)
+    # E51 core: rv64imac (no FPU, no crypto extensions)
+    CFLAGS+=-march=rv64imac$(RISCV64_ZICSR)$(RISCV64_ZIFENCEI) -mabi=lp64 -mcmodel=medany
+    LDFLAGS+=-march=rv64imac -mabi=lp64 -mcmodel=medany
+  else
+    # U54 cores: rv64gc (with FPU)
+    CFLAGS+=-march=rv64imafd$(RISCV64_ZICSR)$(RISCV64_ZIFENCEI) -mabi=lp64d -mcmodel=medany
+    LDFLAGS+=-march=rv64imafd -mabi=lp64d -mcmodel=medany
+
+    # FDT support for DDR S-mode (not needed for L2-LIM bare-metal boot)
+    ifneq ($(MPFS_L2LIM),1)
+      CFLAGS+=-DWOLFBOOT_FDT
+      OBJS+=src/fdt.o
+    endif
+  endif
+  CFLAGS+=-fno-builtin-printf -DUSE_M_TIME -g -nostartfiles -DARCH_RISCV -DARCH_RISCV64
+
+  # Prune unused functions and data
+  CFLAGS +=-ffunction-sections -fdata-sections
+  LDFLAGS+=-Wl,--gc-sections
+
+  # Unified RISC-V boot code (32/64-bit via __riscv_xlen)
+  OBJS+=src/boot_riscv_start.o src/boot_riscv.o src/vector_riscv.o
+
+  ifeq ($(SPMATH),1)
+    MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c64.o
+  endif
+
+  ifneq ($(NO_ASM),1)
+    CFLAGS+=-DWOLFSSL_RISCV_ASM
+    # wolfSSL moved this port to wolfcrypt/src/port/riscv64/ and split each
+    # primitive into a generated <name>-asm.S plus a <name>-asm_c.c.  Only one
+    # is live: the .S builds unless WOLFSSL_RISCV_ASM_INLINE is defined, which
+    # wolfBoot does not define, and the _asm_c.c compiles to an empty
+    # translation unit in that case.  Pick whichever layout the pinned
+    # submodule actually has so this builds against wolfSSL before and after
+    # the move.
+    RISCV_ASM_DIR := $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/riscv64
+    ifneq ($(wildcard $(RISCV_ASM_DIR)/riscv-64-sha256-asm.S),)
+      WOLFCRYPT_OBJS+=$(RISCV_ASM_DIR)/riscv-64-sha256-asm.o \
+                      $(RISCV_ASM_DIR)/riscv-64-sha512-asm.o \
+                      $(RISCV_ASM_DIR)/riscv-64-sha3-asm.o \
+                      $(RISCV_ASM_DIR)/riscv-64-aes-asm.o
+    else
+      WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/riscv/riscv-64-sha256.o \
+                      $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/riscv/riscv-64-sha512.o \
+                      $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/riscv/riscv-64-sha3.o \
+                      $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/riscv/riscv-64-aes.o
+    endif
+  endif
+endif
+
+# powerpc
+ifeq ($(ARCH),PPC)
+  CROSS_COMPILE?=powerpc-linux-gnu-
+  LDFLAGS+=-Wl,--build-id=none
+  # Produce a fully-resolved static ELF (no dynamic relocations).
+  # Required for JTAG probes that load ELFs but don't process relocations.
+  CFLAGS+=-fno-pic -fno-pie
+  LDFLAGS+=-no-pie
+  CFLAGS+=-DARCH_PPC -DFAST_MEMCPY -ffreestanding -fno-tree-loop-distribute-patterns
+
+  ifeq ($(DEBUG_UART),0)
+    CFLAGS+=-fno-builtin-printf
+  endif
+
+  # QorIQ DUART console on the generic NS16550 driver. PowerPC MMIO needs
+  # get8()/set8() (sync/twi/isync, sync/eieio), not a plain volatile access.
+  # stage1 is size-constrained (P1021 gets 4KB total) and keeps its own
+  # copy, so the generic driver is only linked into the full loader.
+  ifeq ($(DEBUG_UART),1)
+    CFLAGS+=-DNS16550_IO_H='"nxp_ppc_io.h"'
+    ifneq ($(STAGE1),1)
+      OBJS+=hal/uart/ns16550.o
+    endif
+  endif
+
+  # Target-specific CPU flags
+  ifeq ($(TARGET),nxp_t2080)
+    CFLAGS+=-mcpu=e6500 -mno-altivec -mbss-plt
+  else ifneq ($(filter nxp_t1024 nxp_t1040,$(TARGET)),)
+    CFLAGS+=-mcpu=e5500
+  endif
+
+  # Prune unused functions and data
+  CFLAGS+=-ffunction-sections -fdata-sections
+  LDFLAGS+=-Wl,--gc-sections
+
+  OBJS+=src/boot_ppc_start.o src/boot_ppc.o
+
+  # CRC32 helpers in src/gpt.c are reused by update_ram.c's uImage header
+  # validator (WOLFBOOT_UBOOT_LEGACY -> uboot_legacy_header_valid).
+  OBJS+=src/gpt.o
+
+  ifeq ($(SPMATH),1)
+    MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+  endif
+
+  ifneq ($(NO_ASM),1)
+    # Use the SHA256/SHA512 and SP math assembly accelerations.
+    # (wolfSSL PR 10767 added the SHA-512 PPC32 asm transform referenced by
+    # sha512.c; --gc-sections prunes it when sha512.o is not linked, e.g. ED25519.)
+    CFLAGS+=-DWOLFSSL_SP_PPC
+    CFLAGS+=-DWOLFSSL_PPC32_ASM -DWOLFSSL_PPC32_ASM_INLINE
+    #CFLAGS+=-DWOLFSSL_PPC32_ASM_SMALL
+    MATH_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/ppc32/ppc32-sha256-asm_c.o
+    # Add the SHA-512 PPC32 asm object only if its source is present (wildcard):
+    # PR 10767 provides it; older checkouts fall back to C sha512.
+    MATH_OBJS+=$(patsubst %.c,%.o,$(wildcard $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/ppc32/ppc32-sha512-asm_c.c))
+  endif
+endif
+
+ifeq ($(TARGET),kinetis)
+  CFLAGS+=\
+      -I$(MCUXPRESSO_DRIVERS) \
+      -I$(MCUXPRESSO_DRIVERS)/drivers \
+      -I$(MCUXPRESSO)/drivers \
+      -I$(MCUXPRESSO)/drivers/common \
+      -I$(MCUXPRESSO_CMSIS)/Include \
+      -I$(MCUXPRESSO_CMSIS)/Core/Include
+  CFLAGS+=\
+      -DCPU_$(MCUXPRESSO_CPU) -DDEBUG_CONSOLE_ASSERT_DISABLE=1 -DNVM_FLASH_WRITEONCE=1
+  OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o
+
+  ifeq ($(MCUXSDK),1)
+    CFLAGS+=\
+      -I$(MCUXPRESSO)/drivers/flash \
+      -I$(MCUXPRESSO)/drivers/sysmpu \
+      -I$(MCUXPRESSO)/drivers/ltc \
+      -I$(MCUXPRESSO)/drivers/port \
+      -I$(MCUXPRESSO)/drivers/gpio
+
+    OBJS+=\
+      $(MCUXPRESSO)/drivers/flash/fsl_ftfx_flash.o \
+      $(MCUXPRESSO)/drivers/flash/fsl_ftfx_cache.o \
+      $(MCUXPRESSO)/drivers/flash/fsl_ftfx_controller.o
+  else
+    OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_ftfx_flash.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_ftfx_cache.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_ftfx_controller.o
+  endif
+
+  ## The following lines can be used to enable HW acceleration
+  ifeq ($(MCUXPRESSO_CPU),MK82FN256VLL15)
+    ifeq ($(PKA),1)
+      PKA_EXTRA_CFLAGS+=-DFREESCALE_USE_LTC
+      PKA_EXTRA_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/nxp/ksdk_port.o
+      ifeq ($(MCUXSDK),1)
+        PKA_EXTRA_OBJS+=$(MCUXPRESSO)/drivers/ltc/fsl_ltc.o
+      else
+        PKA_EXTRA_OBJS+=$(MCUXPRESSO_DRIVERS)/drivers/fsl_ltc.o
+      endif
+    endif
+  endif
+endif
+
+ifeq ($(TARGET),kinetis_kl26)
+  CORTEX_M0=1
+  CFLAGS+=\
+      -I$(MCUXPRESSO_DRIVERS) \
+      -I$(MCUXPRESSO_DRIVERS)/drivers \
+      -I$(MCUXPRESSO_CMSIS)/Include \
+      -I$(MCUXPRESSO_CMSIS)/Core/Include
+  CFLAGS+=\
+      -DCPU_$(MCUXPRESSO_CPU) -DDEBUG_CONSOLE_ASSERT_DISABLE=1 -DNVM_FLASH_WRITEONCE=1
+  CFLAGS+=-Wno-old-style-declaration
+  OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_flash.o
+  ifneq (,$(filter 1,$(DEBUG_UART) $(UART_FLASH)))
+    OBJS+=$(MCUXPRESSO_DRIVERS)/drivers/fsl_lpsci.o
+  endif
+endif
+
+ifeq ($(TARGET),mcxa)
+  CORTEX_M33=1
+  CFLAGS+=\
+      -I$(MCUXPRESSO_DRIVERS) \
+      -I$(MCUXPRESSO_DRIVERS)/drivers \
+      -I$(MCUXPRESSO_DRIVERS)/drivers/common \
+      -I$(MCUXPRESSO_DRIVERS)/drivers/romapi \
+      -I$(MCUXPRESSO_DRIVERS)/../periph \
+      -I$(MCUXPRESSO)/drivers \
+      -I$(MCUXPRESSO)/drivers/common \
+      -I$(MCUXPRESSO_CMSIS)/Include \
+      -I$(MCUXPRESSO_CMSIS)/Core/Include \
+      -I$(MCUXPRESSO)/drivers/flash \
+      -I$(MCUXPRESSO)/drivers/mcx_spc \
+      -I$(MCUXPRESSO)/drivers/sysmpu \
+      -I$(MCUXPRESSO)/drivers/ltc \
+      -I$(MCUXPRESSO)/drivers/port \
+      -I$(MCUXPRESSO)/drivers/gpio
+  CFLAGS+=-DCPU_$(MCUXPRESSO_CPU) -DDEBUG_CONSOLE_ASSERT_DISABLE=1
+  CFLAGS+=-DWOLFSSL_SP_NO_UMAAL
+  CFLAGS+=-Wno-old-style-declaration
+  CFLAGS+=-mcpu=cortex-m33 -DCORTEX_M33 -U__ARM_FEATURE_DSP
+  LDFLAGS+=-mcpu=cortex-m33
+  OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+      $(MCUXPRESSO)/drivers/mcx_spc/fsl_spc.o \
+      $(MCUXPRESSO_PROJECT_TEMPLATE)/clock_config.o
+endif
+
+ifeq ($(TARGET),mcxw)
+  CORTEX_M33=1
+  ifneq ($(TZEN),1)
+    LSCRIPT_IN=hal/$(TARGET)-ns.ld
+  endif
+  CFLAGS+=\
+      -I$(MCUXPRESSO_DRIVERS) \
+      -I$(MCUXPRESSO_DRIVERS)/drivers \
+      -I$(MCUXPRESSO_DRIVERS)/../periph2 \
+      -I$(MCUXPRESSO)/drivers \
+      -I$(MCUXPRESSO)/drivers/common \
+      -I$(MCUXPRESSO)/drivers/ccm32k \
+      -I$(MCUXPRESSO)/drivers/spc \
+      -I$(MCUXPRESSO)/drivers/port \
+      -I$(MCUXPRESSO)/drivers/gpio \
+      -I$(MCUXPRESSO)/drivers/lpuart \
+      -I$(MCUXPRESSO)/drivers/tstmr \
+      -I$(MCUXPRESSO_CMSIS)/Include \
+      -I$(MCUXPRESSO_CMSIS)/Core/Include
+  CFLAGS+=-DCPU_$(MCUXPRESSO_CPU) -DDEBUG_CONSOLE_ASSERT_DISABLE=1
+  CFLAGS+=-Wno-old-style-declaration
+  CFLAGS+=-mcpu=cortex-m33 -DCORTEX_M33
+  # The boot ROM initializes only part of the ECC SRAM
+  CFLAGS+=-DWOLFBOOT_RAM_ECC_INIT
+  LDFLAGS+=-mcpu=cortex-m33
+  OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+      $(MCUXPRESSO)/drivers/spc/fsl_spc.o \
+      $(MCUXPRESSO_PROJECT_TEMPLATE)/clock_config.o \
+      $(MCUXPRESSO)/drivers/ccm32k/fsl_ccm32k.o
+
+  ifeq ($(DEBUG_UART),1)
+    OBJS+=$(MCUXPRESSO)/drivers/lpuart/fsl_lpuart.o
+  endif
+
+  ifeq ($(WOLFCRYPT_TZ),1)
+    MCUXPRESSO_SSS?=$(MCUXPRESSO)/middleware/secure-subsystem
+    CFLAGS+=\
+      -I$(MCUXPRESSO)/drivers/elemu \
+      -I$(MCUXPRESSO_SSS)/inc \
+      -I$(MCUXPRESSO_SSS)/inc/elemu \
+      -I$(MCUXPRESSO_SSS)/src/sscp
+    CFLAGS+=-DSSCP_CONFIG_FILE='"fsl_sscp_config_elemu.h"' \
+      -DSSS_CONFIG_FILE='"fsl_sss_config_elemu.h"'
+    OBJS+=\
+      $(MCUXPRESSO)/drivers/elemu/fsl_elemu.o \
+      $(MCUXPRESSO_SSS)/src/sscp/fsl_sscp_mu.o \
+      $(MCUXPRESSO_SSS)/src/sscp/fsl_sss_sscp.o \
+      $(MCUXPRESSO_SSS)/src/sscp/fsl_sss_mgmt.o
+    $(MCUXPRESSO)/drivers/elemu/fsl_elemu.o: CFLAGS+=-Wno-sign-compare
+  endif
+endif
+
+ifeq ($(TARGET),mcxn)
+  CORTEX_M33=1
+  ifneq ($(TZEN),1)
+    LSCRIPT_IN=hal/$(TARGET)-ns.ld
+  endif
+  CFLAGS+=\
+      -I$(MCUXPRESSO_DRIVERS) \
+      -I$(MCUXPRESSO_DRIVERS)/drivers \
+      -I$(MCUXPRESSO_DRIVERS)/drivers/romapi/flash \
+      -I$(MCUXPRESSO_DRIVERS)/../periph \
+      -I$(MCUXPRESSO) \
+      -I$(MCUXPRESSO)/drivers \
+      -I$(MCUXPRESSO)/drivers/gpio \
+      -I$(MCUXPRESSO)/drivers/port \
+      -I$(MCUXPRESSO)/drivers/common \
+      -I$(MCUXPRESSO)/drivers/lpflexcomm \
+      -I$(MCUXPRESSO)/drivers/lpuart \
+      -I$(MCUXPRESSO_PROJECT_TEMPLATE) \
+      -I$(MCUXPRESSO_CMSIS)/Include \
+      -I$(MCUXPRESSO_CMSIS)/Core/Include
+  CFLAGS+=-DCPU_$(MCUXPRESSO_CPU) -DDEBUG_CONSOLE_ASSERT_DISABLE=1
+  CFLAGS+=-Wno-old-style-declaration
+  CFLAGS+=-mcpu=cortex-m33 -DCORTEX_M33 -U__ARM_FEATURE_DSP
+  LDFLAGS+=-mcpu=cortex-m33
+  OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+      $(MCUXPRESSO_PROJECT_TEMPLATE)/clock_config.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/romapi/flash/src/fsl_flash.o
+
+  ifeq ($(DEBUG_UART),1)
+    OBJS+=\
+      $(MCUXPRESSO)/drivers/lpflexcomm/fsl_lpflexcomm.o \
+      $(MCUXPRESSO)/drivers/lpuart/fsl_lpuart.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_reset.o
+  endif
+
+  # Link ELS PKC only when -DWOLFBOOT_DICE_HW is emitted (WOLFCRYPT_TZ_PSA=1 in options.mk).
+  ifeq ($(WOLFCRYPT_TZ_PSA),1)
+  ifeq ($(WOLFBOOT_DICE_HW),1)
+    ELS_PKC=$(MCUXPRESSO)/components/els_pkc
+    CFLAGS+=\
+      -I$(ELS_PKC)/includes \
+      -I$(ELS_PKC)/src/comps/mcuxClEls/inc \
+      -I$(ELS_PKC)/src/platforms/mcxn \
+      -I$(ELS_PKC)/src/platforms/mcxn/inc
+    OBJS+=\
+      $(ELS_PKC)/src/comps/mcuxClEls/src/mcuxClEls_Common.o \
+      $(ELS_PKC)/src/comps/mcuxClEls/src/mcuxClEls_Kdf.o \
+      $(ELS_PKC)/src/comps/mcuxClEls/src/mcuxClEls_KeyManagement.o \
+      $(ELS_PKC)/src/comps/mcuxClEls/src/mcuxClEls_Ecc.o
+  endif
+  endif
+endif
+
+ifeq ($(TARGET),rw612)
+  CORTEX_M33=1
+  ARCH_FLASH_OFFSET=0x08000000
+  ifneq ($(TZEN),1)
+    LSCRIPT_IN=hal/$(TARGET)-ns.ld
+  endif
+  MCUXPRESSO_FLASH_CONFIG?=$(MCUXPRESSO_PROJECT_TEMPLATE)/../flash_config
+  CFLAGS+=\
+      -I$(MCUXPRESSO_DRIVERS) \
+      -I$(MCUXPRESSO_DRIVERS)/drivers \
+      -I$(MCUXPRESSO_DRIVERS)/drivers/romapi/flexspi \
+      -I$(MCUXPRESSO_DRIVERS)/../periph \
+      -I$(MCUXPRESSO) \
+      -I$(MCUXPRESSO)/drivers \
+      -I$(MCUXPRESSO)/drivers/common \
+      -I$(MCUXPRESSO)/drivers/flexcomm \
+      -I$(MCUXPRESSO)/drivers/flexcomm/usart \
+      -I$(MCUXPRESSO)/drivers/trng \
+      -I$(MCUXPRESSO_FLASH_CONFIG) \
+      -I$(MCUXPRESSO_PROJECT_TEMPLATE) \
+      -I$(MCUXPRESSO_CMSIS)/Include \
+      -I$(MCUXPRESSO_CMSIS)/Core/Include
+  CFLAGS+=-DCPU_$(MCUXPRESSO_CPU) -DBOOT_HEADER_ENABLE=1 -DWOLFBOOT_ROM_IMAGE_HEADER
+  CFLAGS+=-DDEBUG_CONSOLE_ASSERT_DISABLE=1
+  # The RW612 Cortex-M33 has no DSP extension
+  CFLAGS+=-mcpu=cortex-m33+nodsp -DCORTEX_M33
+  LDFLAGS+=-mcpu=cortex-m33+nodsp
+  OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_reset.o \
+      $(MCUXPRESSO_FLASH_CONFIG)/flash_config.o
+
+  ifeq ($(DEBUG_UART),1)
+    OBJS+=\
+      $(MCUXPRESSO)/drivers/flexcomm/fsl_flexcomm.o \
+      $(MCUXPRESSO)/drivers/flexcomm/usart/fsl_usart.o
+  endif
+
+  ifeq ($(WOLFCRYPT_TZ),1)
+    OBJS+=$(MCUXPRESSO)/drivers/trng/fsl_trng.o
+  endif
+endif
+
+ifeq ($(TARGET),nrf5340)
+  ifneq ($(TZEN), 1)
+    LSCRIPT_IN=hal/$(TARGET)-ns.ld
+  endif
+endif
+
+ifeq ($(TARGET),nrf54l)
+  ifneq ($(TZEN), 1)
+    LSCRIPT_IN=hal/$(TARGET)-ns.ld
+  endif
+endif
+
+ifeq ($(TARGET),nrf5340_net)
+  # Net core doesn't support DSP and FP
+  CFLAGS+=-mcpu=cortex-m33+nodsp+nofp
+  LDFLAGS+=-mcpu=cortex-m33+nodsp+nofp
+endif
+
+ifeq ($(TARGET),imx_rt)
+  CFLAGS+=\
+      -I$(MCUXPRESSO_DRIVERS) \
+      -I$(MCUXPRESSO_DRIVERS)/drivers \
+      -I$(MCUXPRESSO)/drivers \
+      -I$(MCUXPRESSO)/drivers/cache/armv7-m7 \
+      -I$(MCUXPRESSO)/drivers/common \
+      -I$(MCUXPRESSO)/drivers/flexspi \
+      -I$(MCUXPRESSO)/drivers/lpuart \
+      -I$(MCUXPRESSO)/drivers/igpio \
+      -I$(MCUXPRESSO)/components/uart \
+      -I$(MCUXPRESSO)/components/flash/nor \
+      -I$(MCUXPRESSO)/components/flash/nor/flexspi \
+      -I$(MCUXPRESSO)/components/serial_manager \
+      -I$(MCUXPRESSO_DRIVERS)/project_template \
+      -I$(MCUXPRESSO_CMSIS)/Include \
+      -I$(MCUXPRESSO_CMSIS)/Core/Include
+  CFLAGS+=\
+      -DCPU_$(MCUXPRESSO_CPU) \
+      -DDEBUG_CONSOLE_ASSERT_DISABLE=1 \
+      -DXIP_EXTERNAL_FLASH=1 -DDEBUG_CONSOLE_ASSERT_DISABLE=1 -DPRINTF_ADVANCED_ENABLE=1 \
+      -DSCANF_ADVANCED_ENABLE=1 -DSERIAL_PORT_TYPE_UART=1 -DNDEBUG=1
+
+  ifeq ($(MCUXSDK),1)
+    CFLAGS+=\
+      -I$(MCUXPRESSO_DRIVERS)/../periph \
+      -I$(MCUXPRESSO)/components/debug_console \
+      -I$(MCUXPRESSO)/components/debug_console/config \
+      -I$(MCUXPRESSO)/components/lists \
+      -I$(MCUXPRESSO)/components/str
+    CFLAGS+=-DDCB=CoreDebug -DDCB_DEMCR_TRCENA_Msk=CoreDebug_DEMCR_TRCENA_Msk
+    OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+      $(MCUXPRESSO)/drivers/flexspi/fsl_flexspi.o \
+      $(MCUXPRESSO)/drivers/cache/armv7-m7/fsl_cache.o
+    ifeq ($(DEBUG_UART),1)
+      OBJS+= $(MCUXPRESSO)/drivers/lpuart/fsl_lpuart.o
+    endif
+  else
+    CFLAGS+=\
+      -I$(MCUXPRESSO_DRIVERS)/utilities/str \
+      -I$(MCUXPRESSO_DRIVERS)/utilities/debug_console
+    OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_flexspi.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_cache.o
+    ifeq ($(DEBUG_UART),1)
+      OBJS+= $(MCUXPRESSO_DRIVERS)/drivers/fsl_lpuart.o
+    endif
+  endif
+
+  ifeq ($(TARGET_IMX_HAB),1)
+      LSCRIPT_IN:=hal/$(TARGET)_hab.ld
+  else
+      LSCRIPT_IN:=hal/$(TARGET).ld
+  endif
+
+  ifeq ($(MCUXPRESSO_CPU),MIMXRT1064DVL6A)
+    ARCH_FLASH_OFFSET=0x70000000
+    ifeq ($(MCUXSDK),1)
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkmimxrt1064/xip/
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkmimxrt1064
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkmimxrt1064/project_template
+    else
+      CFLAGS+=-I$(MCUXPRESSO)/boards/evkmimxrt1064/xip/
+    endif
+  endif
+
+  ifeq ($(MCUXPRESSO_CPU),MIMXRT1062DVL6A)
+    ARCH_FLASH_OFFSET=0x60000000
+    ifeq ($(MCUXSDK),1)
+      # Use evkbmimxrt1060 because evkmimxrt1060 is not supported by the SDK
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbmimxrt1060/xip/
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbmimxrt1060
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbmimxrt1060/project_template
+      CFLAGS+=-I$(MCUXPRESSO)/devices/RT/RT1050/MIMXRT1052
+    else
+      CFLAGS+=-I$(MCUXPRESSO)/boards/evkmimxrt1060/xip/
+    endif
+  endif
+
+  ifeq ($(MCUXPRESSO_CPU),MIMXRT1062DVL6B)
+    ARCH_FLASH_OFFSET=0x60000000
+    ifeq ($(MCUXSDK),1)
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbmimxrt1060/xip/
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbmimxrt1060
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbmimxrt1060/project_template
+      CFLAGS+=-I$(MCUXPRESSO)/devices/RT/RT1050/MIMXRT1052
+    else
+      CFLAGS+=-I$(MCUXPRESSO)/boards/evkbmimxrt1060/xip/
+    endif
+  endif
+
+  ifeq ($(MCUXPRESSO_CPU),MIMXRT1061CVJ5B)
+    ARCH_FLASH_OFFSET=0x60000000
+    ifeq ($(MCUXSDK),1)
+      # Use evkbmimxrt1060 because evkmimxrt1060 is not supported by the SDK
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbmimxrt1060/xip/
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbmimxrt1060
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbmimxrt1060/project_template
+      CFLAGS+=-I$(MCUXPRESSO)/devices/RT/RT1050/MIMXRT1052
+    else
+      CFLAGS+=-I$(MCUXPRESSO)/boards/evkmimxrt1060/xip/
+    endif
+  endif
+
+  ifeq ($(MCUXPRESSO_CPU),MIMXRT1052DVJ6B)
+    ARCH_FLASH_OFFSET=0x60000000
+    ifeq ($(MCUXSDK),1)
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbimxrt1050/xip/
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbimxrt1050
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkbimxrt1050/project_template
+    else
+      CFLAGS+=-I$(MCUXPRESSO)/boards/evkbimxrt1050/xip/
+    endif
+  endif
+
+  ifeq ($(MCUXPRESSO_CPU),MIMXRT1042XJM5B)
+    ARCH_FLASH_OFFSET=0x60000000
+    ifeq ($(MCUXSDK),1)
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkmimxrt1040/xip/
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkmimxrt1040
+      CFLAGS+=-I$(MCUXPRESSO)/examples/_boards/evkmimxrt1040/project_template
+      CFLAGS+=-I$(MCUXPRESSO)/devices/RT/RT1050/MIMXRT1052
+    else
+      CFLAGS+=-I$(MCUXPRESSO)/boards/evkmimxrt1040/xip/
+    endif
+  endif
+
+  ifeq ($(PKA),1)
+    ifeq ($(MCUXSDK),1)
+      PKA_EXTRA_OBJS+= $(MCUXPRESSO)/drivers/dcp/fsl_dcp.o
+    else
+      PKA_EXTRA_OBJS+= $(MCUXPRESSO_DRIVERS)/drivers/fsl_dcp.o
+    endif
+    PKA_EXTRA_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/nxp/dcp_port.o
+    PKA_EXTRA_CFLAGS+=\
+        -DWOLFSSL_IMXRT_DCP \
+        -I$(MCUXPRESSO)/drivers/cache/armv7-m7 \
+        -I$(MCUXPRESSO)/drivers/dcp
+  endif
+endif
+
+# ARM Big Endian
+ifeq ($(ARCH),ARM_BE)
+  OBJS+=src/boot_arm.o
+  ifeq ($(SPMATH),1)
+    MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+  endif
+endif
+
+ifneq ($(filter nxp_t1024 nxp_t1040,$(TARGET)),)
+  # Power PC big endian (e5500 core, T1024 2-core / T1040 4-core)
+  ARCH_FLAGS=-mhard-float -mcpu=e5500
+  CFLAGS+=$(ARCH_FLAGS)
+  BIG_ENDIAN=1
+  CFLAGS+=-DMMU -DWOLFBOOT_FDT -DWOLFBOOT_DUALBOOT
+  CFLAGS+=-pipe # use pipes instead of temp files
+  CFLAGS+=-feliminate-unused-debug-types
+  LDFLAGS+=$(ARCH_FLAGS)
+  LDFLAGS+=-Wl,--hash-style=both # generate both sysv and gnu symbol hash table
+  LDFLAGS+=-Wl,--as-needed # remove weak functions not used
+  OBJS+=src/boot_ppc_mp.o # support for spin table
+  OBJS+=src/fdt.o
+  OBJS+=src/pci.o
+  CFLAGS+=-DWOLFBOOT_USE_PCI
+  # Disk boot from SD card (eSDHC controller, driver hal/nxp_esdhc.c).
+  # src/gpt.o is already linked for all PPC targets above. The driver is
+  # kept out of the size-constrained stage1 loader.
+  # hal/nxp_esdhc.c drives SD cards only: it has no eMMC (CMD1/EXT_CSD)
+  # initialization, so DISK_EMMC has no driver on this arch.
+  ifeq ($(DISK_EMMC),1)
+    $(error DISK_EMMC is not supported on PPC (hal/nxp_esdhc.c is SD card only))
+  endif
+  ifeq ($(DISK_SDCARD),1)
+    CFLAGS+=-D"WOLFBOOT_UPDATE_DISK" -D"MAX_DISKS=1"
+    UPDATE_OBJS:=src/update_disk.o
+    OBJS+=src/disk.o
+    override DISK_DRIVER=esdhc
+    ifneq ($(STAGE1),1)
+      OBJS+=hal/nxp_esdhc.o
+    endif
+  else
+    UPDATE_OBJS:=src/update_ram.o
+  endif
+
+  SPI_TARGET=nxp
+  OPTIMIZATION_LEVEL=0 # using default -Os causes issues with alignment
+endif
+
+ifeq ($(TARGET),nxp_t2080)
+  # Power PC big endian
+  ARCH_FLAGS=-mhard-float -mcpu=e6500
+  CFLAGS+=$(ARCH_FLAGS)
+  BIG_ENDIAN=1
+  CFLAGS+=-DMMU -DWOLFBOOT_FDT -DWOLFBOOT_DUALBOOT
+  # Support U-Boot legacy uImage header: strip 64-byte header before jumping
+  # to the OS image (e.g. uVxWorks, uImage Linux kernel).
+  CFLAGS+=-DWOLFBOOT_UBOOT_LEGACY
+  # 64-bit OS support (VxWorks 7, Linux 64-bit): transitions LAW/TLB to
+  # 36-bit physical addressing before jumping to the OS. Equivalent to
+  # CW U-Boot "ossel ostype2". Set OS_64BIT=1 in .config to enable.
+  ifeq ($(OS_64BIT),1)
+    CFLAGS+=-DENABLE_OS64BIT
+  endif
+  ifneq ($(WOLFBOOT_BOOTARGS),)
+    CFLAGS+=-DWOLFBOOT_BOOTARGS='"$(WOLFBOOT_BOOTARGS)"'
+  endif
+  CFLAGS+=-pipe # use pipes instead of temp files
+  CFLAGS+=-feliminate-unused-debug-types
+  LDFLAGS+=$(ARCH_FLAGS)
+  LDFLAGS+=-Wl,--hash-style=both # generate both sysv and gnu symbol hash table
+  LDFLAGS+=-Wl,--as-needed # remove weak functions not used
+  OBJS+=src/boot_ppc_mp.o # support for spin table
+  OBJS+=src/fdt.o
+  OBJS+=src/pci.o
+  CFLAGS+=-DWOLFBOOT_USE_PCI
+  UPDATE_OBJS:=src/update_ram.o
+endif
+
+ifeq ($(TARGET),nxp_p1021)
+  # Power PC big endian
+  ARCH_FLAGS=-m32 -mhard-float -mcpu=e500mc
+  ARCH_FLAGS+=-fno-builtin -ffreestanding -nostartfiles
+  CFLAGS+=$(ARCH_FLAGS)
+  BIG_ENDIAN=1
+  CFLAGS+=-DWOLFBOOT_DUALBOOT
+  CFLAGS+=-pipe # use pipes instead of temp files
+  LDFLAGS+=$(ARCH_FLAGS)
+  LDFLAGS+=-Wl,--as-needed # remove weak functions not used
+  OBJS+=src/boot_ppc_mp.o # support for spin table
+  UPDATE_OBJS:=src/update_ram.o
+
+  # Use PPC stdlib for memcpy, etc.
+  #CFLAGS+=-DWOLFBOOT_USE_STDLIBC
+
+  SPI_TARGET=nxp
+endif
+
+ifeq ($(TARGET),ti_hercules)
+  # HALCoGen Source and Include?
+  CORTEX_R5=1
+  CFLAGS+=-D"CORTEX_R5" -D"NVM_FLASH_WRITEONCE" -D"FLASHBUFFER_SIZE=32"
+  BIG_ENDIAN=1
+  STACK_USAGE=0
+  USE_GCC=0
+  USE_GCC_HEADLESS=0
+
+  ifeq ($(CCS_ROOT),)
+    $(error "CCS_ROOT must be defined to root of tools")
+  endif
+  CROSS_COMPILE?=$(CCS_ROOT)/bin/
+
+  CC=$(CROSS_COMPILE)armcl
+  LD=$(CROSS_COMPILE)armcl
+  AS=$(CROSS_COMPILE)armasm
+  AR=$(CROSS_COMPILE)armcl -ar
+  OBJCOPY=$(CROSS_COMPILE)armobjcopy
+  SIZE=$(CROSS_COMPILE)armsize
+  OUTPUT_FLAG=--output_file
+
+  F021_DIR?=c:\\ti\\Hercules\\F021\ Flash\ API\\02.01.01
+
+  ARCH_FLAGS=-mv7R5 --code_state=32 --float_support=VFPv3D16 --enum_type=packed --abi=eabi -I"$(CCS_ROOT)/include" -I"$(F021_DIR)/include"
+  CFLAGS+=$(ARCH_FLAGS)
+  LDFLAGS+=$(ARCH_FLAGS) -i"$(CCS_ROOT)/lib" -i"$(F021_DIR)" -z --be32 --map_file=wolfboot.map --reread_libs --diag_wrap=off --display_error_number --warn_sections --heap_size=0 --stack_size=0x800 --ram_model
+  LD_START_GROUP= #--start-group
+  LD_END_GROUP= -llibc.a -l"$(F021_DIR)/F021_API_CortexR4_BE_L2FMC_V3D16.lib"
+
+  OPTIMIZATION_LEVEL=2
+endif
+
+ifeq ($(TARGET),lpc)
+  ifeq ($(MCUXSDK),1)
+    # Some targets in the SDK use drivers from a different target
+    MCUXPRESSO_DRIVERS_SHARED?=$(MCUXPRESSO_DRIVERS)
+    ifneq (,$(filter LPC54628%,$(MCUXPRESSO_CPU)))
+      MCUXPRESSO_DRIVERS_SHARED=$(MCUXPRESSO)/devices/LPC/LPC54000/LPC54628
+    else ifneq (,$(filter LPC54605% LPC54606% LPC54607% LPC54608% LPC54616% LPC54618%,$(MCUXPRESSO_CPU)))
+      MCUXPRESSO_DRIVERS_SHARED=$(MCUXPRESSO)/devices/LPC/LPC54000/LPC54608
+    else ifneq (,$(filter LPC54018M% LPC54S018M%,$(MCUXPRESSO_CPU)))
+      MCUXPRESSO_DRIVERS_SHARED=$(MCUXPRESSO)/devices/LPC/LPC54000/LPC54S018M
+    else ifneq (,$(filter LPC54005% LPC54016% LPC54018% LPC54S005% LPC54S016% LPC54S018%,$(MCUXPRESSO_CPU)))
+      MCUXPRESSO_DRIVERS_SHARED=$(MCUXPRESSO)/devices/LPC/LPC54000/LPC54S018
+    endif
+    CFLAGS+=\
+        -I$(MCUXPRESSO_DRIVERS) \
+        -I$(MCUXPRESSO_DRIVERS_SHARED)/drivers \
+        -I$(MCUXPRESSO_DRIVERS)/../periph \
+        -I$(MCUXPRESSO)/drivers \
+        -I$(MCUXPRESSO)/drivers/common \
+        -I$(MCUXPRESSO)/drivers/flashiap \
+        -I$(MCUXPRESSO_CMSIS)/Include \
+        -I$(MCUXPRESSO_CMSIS)/Core/Include
+    CFLAGS+=\
+        -DCPU_$(MCUXPRESSO_CPU) -DDEBUG_CONSOLE_ASSERT_DISABLE=1
+    CFLAGS+=-DDCB=CoreDebug -DDCB_DEMCR_TRCENA_Msk=CoreDebug_DEMCR_TRCENA_Msk
+    OBJS+=\
+        $(MCUXPRESSO_DRIVERS_SHARED)/drivers/fsl_clock.o \
+        $(MCUXPRESSO_DRIVERS_SHARED)/drivers/fsl_power.o \
+        $(MCUXPRESSO_DRIVERS_SHARED)/drivers/fsl_reset.o
+    CFLAGS+=\
+      -I$(MCUXPRESSO)/drivers/flashiap \
+      -I$(MCUXPRESSO)/drivers/flexcomm
+    OBJS+=\
+      $(MCUXPRESSO)/drivers/common/fsl_common.o \
+      $(MCUXPRESSO)/drivers/common/fsl_common_arm.o \
+      $(MCUXPRESSO)/drivers/flashiap/fsl_flashiap.o \
+      $(MCUXPRESSO)/drivers/flexcomm/usart/fsl_usart.o \
+      $(MCUXPRESSO)/drivers/flexcomm/fsl_flexcomm.o
+  else
+    CFLAGS+=\
+        -I$(MCUXPRESSO_DRIVERS) \
+        -I$(MCUXPRESSO_DRIVERS)/drivers \
+        -I$(MCUXPRESSO)/drivers \
+        -I$(MCUXPRESSO)/drivers/common \
+        -I$(MCUXPRESSO_CMSIS)/Include \
+        -I$(MCUXPRESSO_CMSIS)/Core/Include
+    CFLAGS+=\
+        -DCPU_$(MCUXPRESSO_CPU) -DDEBUG_CONSOLE_ASSERT_DISABLE=1
+    OBJS+=\
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_power.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_reset.o
+    LIBS+=\
+        $(MCUXPRESSO_DRIVERS)/mcuxpresso/libpower_softabi.a
+    OBJS+=\
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_common.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_flashiap.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_usart.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_flexcomm.o
+  endif
+endif
+
+ifeq ($(TARGET),imx_rt7xx)
+  CORTEX_M33=1
+  LDFLAGS+=-Wl,--no-warn-rwx-segments
+  CFLAGS+=-Wno-attributes
+  CFLAGS+=-DCPU_$(MCUXPRESSO_CPU) -DNDEBUG -DSDK_DEBUGCONSOLE=0 \
+      -DCONFIG_FLASH_DRIVER_EXECUTES_FROM_RAM=1
+  ifeq ($(MCUXSDK),1)
+    MCUXPRESSO_DRIVERS=$(MCUXPRESSO)/devices/RT/RT700/MIMXRT798S
+    CFLAGS+=\
+        -I$(MCUXPRESSO_DRIVERS) \
+        -I$(MCUXPRESSO_DRIVERS)/drivers \
+        -I$(MCUXPRESSO_DRIVERS)/../periph \
+        -I$(MCUXPRESSO)/drivers/xspi \
+        -I$(MCUXPRESSO)/drivers/common \
+        -I$(MCUXPRESSO_CMSIS)/Core/Include
+    OBJS+=\
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_reset.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_power.o \
+        $(MCUXPRESSO)/drivers/common/fsl_common_arm.o \
+        $(MCUXPRESSO)/drivers/xspi/fsl_xspi.o
+  else
+    CFLAGS+=\
+        -I$(MCUXPRESSO_DRIVERS) \
+        -I$(MCUXPRESSO_DRIVERS)/drivers \
+        -I$(MCUXPRESSO_DRIVERS)/periph \
+        -I$(MCUXPRESSO_CMSIS)
+    OBJS+=\
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_reset.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_common_arm.o \
+        $(MCUXPRESSO_DRIVERS)/drivers/fsl_xspi.o
+  endif
+endif
+
+ifeq ($(TARGET),nxp_lpc54s0xx)
+  ARCH_FLASH_OFFSET=0x10000000
+  LDFLAGS+=-Wl,--no-warn-rwx-segments
+  # Bare-metal HAL — no NXP SDK dependencies
+endif
+
+ifeq ($(TARGET),lpc55s69)
+  ifneq ($(TZEN),1)
+    LSCRIPT_IN=hal/$(TARGET)-ns.ld
+  endif
+  CFLAGS+=\
+      -I$(MCUXPRESSO_PROJECT_TEMPLATE) \
+      -I$(MCUXPRESSO_DRIVERS) \
+      -I$(MCUXPRESSO_DRIVERS)/drivers \
+      -I$(MCUXPRESSO_DRIVERS)/../periph \
+      -I$(MCUXPRESSO)/drivers \
+      -I$(MCUXPRESSO)/drivers/casper \
+      -I$(MCUXPRESSO)/drivers/common \
+      -I$(MCUXPRESSO)/drivers/flexcomm \
+      -I$(MCUXPRESSO)/drivers/flexcomm/usart \
+      -I$(MCUXPRESSO)/drivers/hashcrypt \
+      -I$(MCUXPRESSO)/drivers/iap1 \
+      -I$(MCUXPRESSO)/drivers/lpc_gpio \
+      -I$(MCUXPRESSO)/drivers/lpc_iocon \
+      -I$(MCUXPRESSO)/drivers/rng_1 \
+      -I$(MCUXPRESSO_CMSIS)/Include \
+      -I$(MCUXPRESSO_CMSIS)/Core/Include
+  CFLAGS+=-DWOLFSSL_NXP_RNG_1
+  CFLAGS+=-DCPU_$(MCUXPRESSO_CPU)
+  CFLAGS+=-DFSL_SDK_DISABLE_DRIVER_CLOCK_CONTROL=1
+  CFLAGS+=-DFSL_SDK_DISABLE_DRIVER_RESET_CONTROL=1
+  CFLAGS+=-mcpu=cortex-m33 -DCORTEX_M33 -U__ARM_FEATURE_DSP
+  LDFLAGS+=-mcpu=cortex-m33 -Wl,--no-warn-rwx-segments
+  OBJS+=\
+      $(MCUXPRESSO_PROJECT_TEMPLATE)/clock_config.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_clock.o \
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_power.o \
+      $(MCUXPRESSO)/drivers/common/fsl_common_arm.o \
+      $(MCUXPRESSO)/drivers/iap1/fsl_iap.o \
+      $(MCUXPRESSO)/drivers/lpc_gpio/fsl_gpio.o \
+      $(MCUXPRESSO)/drivers/rng_1/fsl_rng.o
+  ifeq ($(DEBUG_UART),1)
+    OBJS+=\
+      $(MCUXPRESSO_DRIVERS)/drivers/fsl_reset.o \
+      $(MCUXPRESSO)/drivers/flexcomm/fsl_flexcomm.o \
+      $(MCUXPRESSO)/drivers/flexcomm/usart/fsl_usart.o
+  endif
+  ifeq ($(PKA),1)
+    CFLAGS+=-DWOLFSSL_NXP_LPC55S6X
+    OBJS+=\
+        $(MCUXPRESSO)/drivers/casper/fsl_casper.o \
+        $(MCUXPRESSO)/drivers/hashcrypt/fsl_hashcrypt.o \
+        $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/nxp/casper_port.o \
+        $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/nxp/hashcrypt_port.o
+  endif
+endif
+
+ifeq ($(TARGET),psoc6)
+    CORTEX_M0=1
+    OBJS+=\
+        $(CYPRESS_PDL)/drivers/source/cy_flash.o \
+        $(CYPRESS_PDL)/drivers/source/cy_ipc_pipe.o \
+        $(CYPRESS_PDL)/drivers/source/cy_ipc_sema.o \
+        $(CYPRESS_PDL)/drivers/source/cy_ipc_drv.o \
+        $(CYPRESS_PDL)/drivers/source/cy_device.o \
+        $(CYPRESS_PDL)/drivers/source/cy_sysclk.o \
+        $(CYPRESS_PDL)/drivers/source/cy_sysint.o \
+        $(CYPRESS_PDL)/drivers/source/cy_syslib.o \
+        $(CYPRESS_PDL)/drivers/source/cy_ble_clk.o \
+        $(CYPRESS_PDL)/drivers/source/cy_wdt.o \
+        $(CYPRESS_PDL)/drivers/source/TOOLCHAIN_GCC_ARM/cy_syslib_gcc.o \
+        $(CYPRESS_PDL)/devices/templates/COMPONENT_MTB/COMPONENT_CM0P/system_psoc6_cm0plus.o
+    PSOC6_CRYPTO_OBJS=\
+        $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/port/cypress/psoc6_crypto.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_vu.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_ecc_domain_params.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_ecc_nist_p.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_ecc_ecdsa.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_sha_v2.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_sha_v1.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_mem_v2.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_mem_v1.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_hw.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto_core_hw_v1.o \
+        $(CYPRESS_PDL)/drivers/source/cy_crypto.o
+
+    CFLAGS+=\
+        -I$(CYPRESS_PDL)/devices/include \
+        -I$(CYPRESS_PDL)/drivers/include \
+        -I$(CYPRESS_PDL)/cmsis/include \
+        -I$(CYPRESS_TARGET_LIB) \
+        -I$(CYPRESS_CORE_LIB)/include \
+        -I$(CYPRESS_PDL)/devices/include/ip \
+        -I$(CYPRESS_PDL)/devices/templates/COMPONENT_MTB \
+        -DCY8C624ABZI_D44
+    ARCH_FLASH_OFFSET=0x10000000
+    ifneq ($(PSOC6_CRYPTO),0)
+        CFLAGS+=-DWOLFSSL_PSOC6_CRYPTO
+        OBJS+=$(PSOC6_CRYPTO_OBJS)
+    endif
+endif
+
+ifeq ($(USE_CLANG),1)
+  ifneq ($(ARCH),ARM)
+    $(error USE_CLANG=1 is currently supported only for ARCH=ARM)
+  endif
+  CLANG?=clang
+  CLANG_GCC_NAME?=$(CROSS_COMPILE)gcc
+  CLANG_TARGET?=arm-none-eabi
+  CLANG_DRIVER:=$(CLANG) --target=$(CLANG_TARGET) -ccc-gcc-name $(CLANG_GCC_NAME)
+  CLANG_LIBC_A?=$(shell $(CLANG_GCC_NAME) -print-file-name=libc.a)
+  CLANG_NEWLIB_INCLUDE?=$(abspath $(dir $(CLANG_LIBC_A))/../include)
+
+  CC=$(CLANG_DRIVER)
+  LD=$(CLANG_DRIVER) -fuse-ld=lld
+  AS=$(CLANG_DRIVER)
+  AR=llvm-ar
+  OBJCOPY?=llvm-objcopy
+  SIZE=llvm-size
+
+  CFLAGS+=-isystem $(CLANG_NEWLIB_INCLUDE)
+  CFLAGS+=-DWOLFSSL_NO_ATOMIC -DWOLFSSL_NO_ATOMICS
+  # newlib's <stdatomic.h> is unusable under clang for arm-none-eabi (references
+  # int_leastN_t before they are declared); skip it so wc_port.h falls back to
+  # the __atomic_thread_fence compiler builtin
+  CFLAGS+=-DNO_STDATOMIC_H
+  CFLAGS+=-Wno-unknown-attributes -Wno-error=unknown-attributes
+  CFLAGS+=-fno-unwind-tables -fno-asynchronous-unwind-tables
+  LDFLAGS+=-nostdlib
+endif
+
+ifeq ($(USE_ARMCLANG),1)
+  ifneq ($(ARCH),ARM)
+    $(error USE_ARMCLANG=1 is currently supported only for ARCH=ARM)
+  endif
+  ARMCLANG_PATH?=
+  CC=$(ARMCLANG_PATH)armclang --target=arm-arm-none-eabi
+  AS=$(CC)
+  LD=$(ARMCLANG_PATH)armlink
+  AR=$(ARMCLANG_PATH)armar
+  FROMELF?=$(ARMCLANG_PATH)fromelf
+  SIZE=$(FROMELF) -z
+  OBJCOPY=FROMELF="$(FROMELF)" $(WOLFBOOT_ROOT)/tools/armclang/objcopy.sh
+
+  CFLAGS+=-mfloat-abi=soft
+  CFLAGS+=-fno-unwind-tables -fno-asynchronous-unwind-tables
+  CFLAGS+=-Wno-unknown-attributes -Wno-error=unknown-attributes
+
+  # Map scatter files region names to GNU ld symbols used by wolfBoot code
+  CFLAGS+=-D'_start_text=Image$$$$ER_VECTORS$$$$Base'
+  CFLAGS+=-D'_stored_data=Load$$$$RW_RAM$$$$Base'
+  CFLAGS+=-D'_start_data=Image$$$$RW_RAM$$$$Base'
+  CFLAGS+=-D'_end_data=Image$$$$RW_RAM$$$$Limit'
+  CFLAGS+=-D'_start_bss=Image$$$$RW_RAM$$$$ZI$$$$Base'
+  CFLAGS+=-D'_end_bss=Image$$$$RW_RAM$$$$ZI$$$$Limit'
+
+  # Base armlink options shared by both images:
+  # - the unreferenced vector table needs an explicit --keep or unused
+  #   section elimination removes it
+  # - RW data compression must be off: wolfBoot copies .data to RAM itself,
+  #   word by word, and would copy the compressed image
+  # - Suppress L6314W (no section matches pattern) is suppressed: the scatter
+  #   files list sections that are only present in some configurations (e.g.
+  #   .ramcode)
+  # - --no_startup: wolfBoot has its own reset handler.
+  ARMCLANG_LDFLAGS=--cpu=Cortex-M33 --fpu=SoftVFP --entry=isr_reset \
+                   --keep="*(.isr_vector)" --datacompressor=off --remove \
+                   --no_startup --info=sizes,totals,unused --diag_suppress=6314
+endif
+
+ifeq ($(USE_GCC),1)
+  ## Toolchain setup
+  CC=$(CROSS_COMPILE)gcc
+  LD=$(CROSS_COMPILE)gcc
+  AS=$(CROSS_COMPILE)gcc
+  AR=$(CROSS_COMPILE)ar
+  OBJCOPY?=$(CROSS_COMPILE)objcopy
+  SIZE=$(CROSS_COMPILE)size
+endif
+OUTPUT_FLAG?=-o
+
+ifeq ($(filter $(TARGET),x86_fsp_qemu kontron_vx3060_s2),$(TARGET))
+  FSP=1
+  CFLAGS+=-ffunction-sections -fdata-sections -ffreestanding -nostdlib -static
+  # some std libc have headers that bring in extra symbols used in
+  # FORTIFY_SOURCE realated checks. Use -U_FORTIFY_SOURCE to avoid that.
+  CFLAGS+=-U_FORTIFY_SOURCE
+  ifeq ($(TARGET), kontron_vx3060_s2)
+    FSP_TGL=1
+    CFLAGS+=-DWOLFBOOT_TGL=1
+  endif
+endif
+
+ifeq ($(TARGET),x86_fsp_qemu)
+    OBJS+=src/x86/qemu_fsp.o
+endif
+
+# x86-64 FSP targets
+ifeq ("${FSP}", "1")
+  CFLAGS+=-DWOLFBOOT_FSP=1
+  USE_GCC_HEADLESS=0
+  LD_START_GROUP =
+  LD_END_GROUP =
+  LD := ld
+  # load to address in RAM after wolfBoot (aligned to 16 bytes)
+  CFLAGS+=-DWOLFBOOT_NO_LOAD_ADDRESS
+  ifeq ($(filter-out $(STAGE1),1),)
+    # building stage1
+    ifeq ($(FSP_TGL), 1)
+      LSCRIPT_IN = ../hal/x86_fsp_tgl_stage1.ld
+    else
+      LSCRIPT_IN = ../hal/$(TARGET)_stage1.ld
+    endif
+    # using ../wolfboot.map as stage1 is built from stage1 sub-directory
+    LDFLAGS = --defsym main=0x`nm ../wolfboot.elf | grep -w main | awk '{print $$1}'` \
+              --defsym wb_start_bss=0x`nm ../wolfboot.elf | grep -w _start_bss | awk '{print $$1}'` \
+              --defsym wb_end_bss=0x`nm ../wolfboot.elf | grep -w _end_bss | awk '{print $$1}'` \
+              --defsym _stage2_params=0x`nm ../wolfboot.elf | grep -w _stage2_params | awk '{print $$1}'`
+    LDFLAGS +=  --gc-sections --entry=reset_vector -T $(LSCRIPT) -m elf_i386  -Map=loader_stage1.map
+    OBJS += src/boot_x86_fsp.o
+    OBJS += src/boot_x86_fsp_start.o
+    OBJS += src/fsp_m.o
+    OBJS += src/fsp_t.o
+    OBJS += src/wolfboot_raw.o
+    OBJS += src/x86/common.o
+    OBJS += src/x86/hob.o
+    OBJS += src/pci.o
+    CFLAGS+=-DWOLFBOOT_USE_PCI
+    OBJS += hal/x86_uart.o
+    OBJS += src/string.o
+    OBJS += src/stage2_params.o
+    OBJS += src/x86/fsp.o
+    ifeq ($(filter-out $(STAGE1_AUTH),1),)
+      OBJS += src/libwolfboot.o
+      OBJS += src/image.o
+      OBJS += src/keystore.o
+      OBJS += src/sig_wolfboot_raw.o
+      ifeq ($(TARGET), kontron_vx3060_s2)
+        OBJS += hal/kontron_vx3060_s2_loader.o
+      endif
+      OBJS += $(WOLFCRYPT_OBJS)
+      CFLAGS+=-DSTAGE1_AUTH
+    endif
+
+    CFLAGS += -fno-stack-protector -m32 -fno-PIC -fno-pie -mno-mmx -mno-sse -DDEBUG_UART
+    CFLAGS += -DFSP_M_BASE=$(FSP_M_BASE)
+    ifeq ($(FSP_TGL), 1)
+      OBJS+=src/x86/tgl_fsp.o
+      OBJS+=src/ucode0.o
+      CFLAGS += -DUCODE0_ADDRESS=$(UCODE0_BASE)
+    endif
+    ifeq ($(TARGET),x86_fsp_qemu)
+      OBJS += hal/x86_fsp_qemu_loader.o
+    endif
+  else
+    # building wolfBoot
+    ifeq ($(FSP_TGL), 1)
+      LSCRIPT_IN = hal/x86_fsp_tgl.ld.in
+    else
+      LSCRIPT_IN = hal/$(TARGET).ld.in
+    endif
+    LDFLAGS = --gc-sections --entry=main  -T $(LSCRIPT) -Map=wolfboot.map
+    CFLAGS += -fno-stack-protector -fno-PIC -fno-pie -mno-mmx -mno-sse -Os -DDEBUG_UART
+    CFLAGS += -DFSP_M_BASE=$(FSP_M_BASE)
+    OBJS += hal/x86_fsp_tgl.o
+    OBJS += hal/x86_uart.o
+    OBJS += src/boot_x86_fsp_payload.o
+    OBJS += src/x86/common.o
+    OBJS += src/x86/hob.o
+    OBJS += src/pci.o
+    CFLAGS+=-DWOLFBOOT_USE_PCI
+    OBJS += src/x86/ahci.o
+    OBJS += src/x86/ata.o
+    OBJS += src/gpt.o
+    OBJS += src/disk.o
+    OBJS += src/x86/mptable.o
+    OBJS += src/stage2_params.o
+    OBJS += src/x86/exceptions.o
+    OBJS += src/x86/gdt.o
+    OBJS += src/x86/fsp.o
+    OBJS += src/x86/fsp_s.o
+    UPDATE_OBJS := src/update_disk.o
+    CFLAGS+=-DWOLFBOOT_UPDATE_DISK
+    ifeq ($(64BIT),1)
+      LDFLAGS += -m elf_x86_64 --oformat elf64-x86-64
+      CFLAGS += -m64
+    else
+      CFLAGS += -m32
+      LDFLAGS += -m elf_i386 --oformat elf32-i386
+    endif
+    ifeq ($(FSP_TGL), 1)
+      OBJS+=src/x86/tgl_fsp.o
+    endif
+  endif
+  ifeq ($(64BIT),1)
+    OBJS += src/x86/paging.o
+  endif
+endif
+
+ifneq ($(CROSS_COMPILE_PATH),)
+  # optional path for cross compiler includes
+  CFLAGS+=-I$(CROSS_COMPILE_PATH)/usr/include --sysroot=$(CROSS_COMPILE_PATH)
+  LDFLAGS+=-L$(CROSS_COMPILE_PATH)/usr/lib --sysroot=$(CROSS_COMPILE_PATH)
+endif
+
+
+ifeq ($(TARGET),x86_64_efi)
+  USE_GCC_HEADLESS=0
+  GNU_EFI_LIB_PATH?=/usr/lib
+  GNU_EFI_CRT0=$(GNU_EFI_LIB_PATH)/crt0-efi-x86_64.o
+  GNU_EFI_LSCRIPT=$(GNU_EFI_LIB_PATH)/elf_x86_64_efi.lds
+  CFLAGS += -fpic -ffreestanding -fno-stack-protector -fno-stack-check \
+            -fshort-wchar -mno-red-zone -maccumulate-outgoing-args
+  CFLAGS += -I/usr/include/efi -I/usr/include/efi/x86_64 \
+            -DTARGET_X86_64_EFI  -DWOLFBOOT_DUALBOOT
+  # avoid using of fixed LOAD_ADDRESS, uefi target uses dynamic location
+  CFLAGS += -DWOLFBOOT_NO_LOAD_ADDRESS
+  LDFLAGS = -shared -Bsymbolic -L/usr/lib -T$(GNU_EFI_LSCRIPT)
+  LD_START_GROUP = $(GNU_EFI_CRT0)
+  LD_END_GROUP = -lgnuefi -lefi
+  LD = ld
+  UPDATE_OBJS:=src/update_ram.o
+endif
+
+ifeq ($(TARGET),aarch64_efi)
+  # Generic AArch64 UEFI application (validated on NVIDIA Jetson Orin Nano).
+  # Build gnu-efi for aarch64 first: ./tools/scripts/build-gnu-efi-aarch64.sh
+  # (override the install path with GNU_EFI_PATH=... if needed).
+  USE_GCC_HEADLESS=0
+  GNU_EFI_PATH?=tools/gnu-efi-aarch64
+  GNU_EFI_LIB_PATH?=$(GNU_EFI_PATH)/lib
+  GNU_EFI_INC_PATH?=$(GNU_EFI_PATH)/include
+  GNU_EFI_CRT0=$(GNU_EFI_LIB_PATH)/crt0-efi-aarch64.o
+  GNU_EFI_LSCRIPT=$(GNU_EFI_LIB_PATH)/elf_aarch64_efi.lds
+  CFLAGS += -fpic -ffreestanding -fno-stack-protector -fno-stack-check \
+            -fshort-wchar -mstrict-align
+  CFLAGS += -I$(GNU_EFI_INC_PATH) -I$(GNU_EFI_INC_PATH)/efi \
+            -I$(GNU_EFI_INC_PATH)/efi/aarch64 \
+            -DTARGET_aarch64_efi -DWOLFBOOT_DUALBOOT
+  # avoid using of fixed LOAD_ADDRESS, uefi target uses dynamic location
+  CFLAGS += -DWOLFBOOT_NO_LOAD_ADDRESS
+  # AArch64 PE/COFF output format for objcopy (see the wolfboot.efi rule).
+  # This binutils exposes it as pei-aarch64-little (not efi-app-aarch64).
+  EFI_OBJCOPY_TARGET=pei-aarch64-little
+  # --allow-multiple-definition: gnu-efi's libefi init.o (pulled in for
+  # InitializeLib) also defines memset/memcpy; wolfBoot's src/string.o comes
+  # first in link order and wins.
+  LDFLAGS = -shared -Bsymbolic --allow-multiple-definition \
+            -L$(GNU_EFI_LIB_PATH) -T$(GNU_EFI_LSCRIPT)
+  LD_START_GROUP = $(GNU_EFI_CRT0)
+  LD_END_GROUP = -lgnuefi -lefi
+  LD = $(CROSS_COMPILE)ld
+  UPDATE_OBJS:=src/update_ram.o
+endif
+
+ifeq ($(ARCH),sim)
+  USE_GCC_HEADLESS=0
+  LD = gcc
+  ifneq ($(TARGET),library)
+  ifneq ($(TARGET),library_fs)
+    UPDATE_OBJS:=src/update_flash.o
+  endif
+  endif
+  ifeq ($(TARGET),library_fs)
+    UPDATE_OBJS += hal/filesystem.o
+  endif
+  LD_START_GROUP=
+  LD_END_GROUP=
+  BOOT_IMG=test-app/image.elf
+  CFLAGS+=-DARCH_SIM
+  ifneq ($(ELF_FLASH_SCATTER),1)
+    CFLAGS+=-DWOLFBOOT_USE_STDLIBC
+  endif
+  ifeq ($(FORCE_32BIT),1)
+    CFLAGS+=-m32
+    LDFLAGS+=-m32
+  endif
+  ifeq ($(SPMATH),1)
+    ifeq ($(FORCE_32BIT),1)
+      MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+      CFLAGS+=-DWOLFSSL_SP_DIV_WORD_HALF
+    else ifeq ($(shell uname -m),aarch64)
+      CFLAGS += -DARCH_AARCH64 -DFAST_MEMCPY
+      MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+      MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_arm64.o
+    else
+      MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+      CFLAGS+=-DWOLFSSL_SP_DIV_WORD_HALF
+    endif
+  endif
+  ifeq ($(WOLFHSM_CLIENT),1)
+    WOLFHSM_OBJS += $(WOLFBOOT_LIB_WOLFHSM)/port/posix/posix_transport_tcp.o
+  endif
+  ifeq ($(WOLFHSM_SERVER),1)
+    WOLFHSM_OBJS += $(WOLFBOOT_LIB_WOLFHSM)/port/posix/posix_flash_file.o \
+                    $(WOLFBOOT_LIB_WOLFHSM)/src/wh_transport_mem.o
+
+  endif
+  # wolfHSM NVM image generation support for simulator
+  # User must provide NVM_CONFIG for their specific setup
+  ifneq ($(filter 1,$(WOLFHSM_CLIENT) $(WOLFHSM_SERVER)),)
+    WH_NVM_BIN ?= whNvmImage.bin
+    WH_NVM_HEX ?= whNvmImage.hex
+    WH_NVM_PART_SIZE ?= 16384 # must match partition size in hal/sim.c
+    WH_NVM_BASE_ADDRESS ?= 0x0
+
+    CFLAGS += -DWOLFHSM_CFG_NO_SYS_TIME
+  endif
+endif
+
+# TI C2000 C28x DSP (TMS320F28P550SJ / LAUNCHXL-F28P55X), cl2000 toolchain.
+# Word-addressed, CHAR_BIT==16.  Modeled on the ti_hercules (armcl) TI-CGT flow.
+ifeq ($(ARCH),C2000)
+  # cl2000 is not gcc: turn off the gcc/headless CFLAGS+LDFLAGS blocks that
+  # follow the arch.mk include (Makefile ~line 247) before they are evaluated.
+  USE_GCC:=0
+  USE_GCC_HEADLESS:=0
+
+  C2000WARE?=$(HOME)/ti/C2000Ware_26_01_00_00
+  ifeq ($(CGT_ROOT),)
+    $(error Set CGT_ROOT to a TI C2000 codegen install (the dir with bin/cl2000))
+  endif
+  C2000_DEV:=$(C2000WARE)/device_support/f28p55x
+  C2000_DRV:=$(C2000WARE)/driverlib/f28p55x/driverlib
+  C2000_FAPI:=$(C2000WARE)/libraries/flash_api/f28p55x
+
+  CC=$(CGT_ROOT)/bin/cl2000
+  LD=$(CGT_ROOT)/bin/cl2000
+  AS=$(CGT_ROOT)/bin/cl2000
+  AR=$(CGT_ROOT)/bin/ar2000
+  OUTPUT_FLAG=--output_file
+
+  # --float_support/--abi must match the prebuilt driverlib.lib + Fapi lib (EABI).
+  ARCH_FLAGS=-v28 --float_support=fpu32 --tmu_support=tmu1 --abi=eabi \
+             --gen_func_subsections=on
+  # Set the level here so options.mk emits -O2 (matching cl2000) instead of its
+  # default gcc-only -Os, which would otherwise be appended after our flags.
+  OPTIMIZATION_LEVEL=2
+  CFLAGS+=$(ARCH_FLAGS) -D_LAUNCHXL_F28P55X -D_FLASH \
+          -I$(CGT_ROOT)/include -I$(C2000_DRV) \
+          -I$(C2000_DEV)/common/include -I$(C2000_DEV)/headers/include \
+          -I$(C2000_FAPI)/include -I$(C2000_FAPI)/include/FlashAPI
+  # The C28x has no 8-bit type, so ISO <stdint.h> omits int8_t/uint8_t; supply
+  # them (as 16-bit) via a preinclude for every TU.  #303 is the harmless
+  # "typedef already declared (same type)" clash with driverlib's hw_types.h.
+  # #169 is the expected uint8_t*(=uint16_t*) vs wolfSSL byte*(=unsigned char*)
+  # pointer mismatch; both are 16-bit cells holding one octet, so it is safe.
+  CFLAGS+=--preinclude=c2000_stdint.h --diag_suppress=303 --diag_suppress=169
+  LDFLAGS+=$(ARCH_FLAGS) -z --reread_libs --warn_sections \
+           -i$(CGT_ROOT)/lib -i$(C2000_DRV)/ccs/Release -i$(C2000_FAPI)/lib \
+           -m wolfboot.map
+  LD_START_GROUP:=
+  LD_END_GROUP:=-l driverlib.lib -l FAPI_F28P55x_EABI_v4.00.00.lib -l libc.a
+  ARCH_FLASH_OFFSET=0x80000
+
+  # TI device startup: reset codestart -> _c_int00 (RTS) -> main.
+  OBJS+=$(C2000_DEV)/common/source/device.o
+  OBJS+=$(C2000_DEV)/common/source/f28p55x_codestartbranch.o
+  OBJS+=src/boot_c2000.o
+
+  ifeq ($(SPMATH),1)
+    # SECP256R1 fast SP path (wide-byte hand-patched octet masks live here).
+    MATH_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+  endif
+
+  # TI assembler sources use the .asm suffix.
+%.o:%.asm
+	@echo "\t[AS-C2000] $@"
+	$(Q)$(CC) $(CFLAGS) -c $(OUTPUT_FLAG) $@ $^
+endif
+
+# Infineon AURIX platforms
+#
+# TC3xx SoCs are a heterogeneous architecture with ARM and Tricore CPUs, but are
+# grouped together in wolfBoot under ARCH=AURIX, since platform support is
+# different enough from existing ARCH variants to not share things like compiler
+# flags or startup code.
+#
+# TARGET=aurix_tc3xx: AURIX TC3xx TriCore host
+# TARGET=aurix_tc3xx_hsm: AURIX TC3xx Cortex-M3 HSM core
+# TARGET=aurix_tc4xx: AURIX TC4xx TriCore host
+# TARGET=aurix_tc4xx_csrm: AURIX TC4xx CSRM (TriCore CPU6)
+
+# Backwards compatibility migration error for legacy ARCH=AURIX_TC3
+ifeq ($(filter clean keysclean,$(MAKECMDGOALS)),)
+  ifeq ($(ARCH),AURIX_TC3)
+    $(error ARCH=AURIX_TC3 was renamed to ARCH=AURIX)
+  endif
+  ifeq ($(AURIX_TC3_HSM),1)
+    $(error AURIX_TC3_HSM=1 was replaced by TARGET=aurix_tc3xx_hsm)
+  endif
+endif
+
+ifeq ($(ARCH), AURIX)
+  # TC3xx HSM and host cores
+  ifneq (,$(filter aurix_tc3xx aurix_tc3xx_hsm,$(TARGET)))
+    # Toolchain selection (mutually exclusive, HT_GCC is the default),
+    # matching the wolfHSM tc3xx tchsm-server/tchsm-client Makefiles:
+    #   HT_GCC=1  HighTec GCC (Tricore host; ARM arm-elf-gcc for the HSM)
+    #   HT_LLVM=1 HighTec LLVM/clang (Tricore or ARM)
+    #   GCC=1     Open-source GCC (tricore-elf; arm-none-eabi for the HSM)
+    ifneq ($(filter-out 0 1,$(words $(filter 1,$(GCC) $(HT_GCC) $(HT_LLVM)))),)
+      $(error GCC, HT_GCC, and HT_LLVM are mutually exclusive; set only one)
+    endif
+    ifneq ($(filter 1,$(USE_CLANG) $(USE_ARMCLANG)),)
+      $(error Use HT_LLVM=1 for AURIX clang builds, not USE_CLANG/USE_ARMCLANG)
+    endif
+    ifeq ($(GCC),1)
+      USE_GCC:=1
+    else ifeq ($(HT_LLVM),1)
+      USE_GCC:=0
+    else
+      HT_GCC:=1
+      USE_GCC:=1
+    endif
+
+    CFLAGS += -I$(TC3_DIR) -Ihal
+
+    CFLAGS += -Werror
+    CFLAGS += -Wall -Wdiv-by-zero -Warray-bounds -Wformat -Wformat-security \
+              -Wignored-qualifiers -Wno-implicit-function-declaration \
+              -Wno-type-limits -Wno-unused-variable -Wno-unused-parameter \
+              -Wno-missing-braces -fno-common -pipe \
+              -ffunction-sections -fdata-sections -fmessage-length=0 \
+              -std=gnu99 -DPART_BOOT_EXT -DPART_UPDATE_EXT -DPART_SWAP_EXT \
+              -DHAVE_TC3XX -DWOLFBOOT_LOADER_MAIN
+
+    ifeq ($(HT_GCC),1)
+      # Older HT GCC 4.6 flags designated/partial initializers
+      CFLAGS += -Wno-missing-field-initializers
+      # Older HT GCC 4.6 also flags WOLFBOOT_HDR_GET_U32() on byte arrays as
+      # type-punning
+      CFLAGS += -Wno-strict-aliasing
+    endif
+
+    # Set TC3_CFG_DFLASH_SINGLE_ENDED=1 for devices with DFLASH provisioned in single
+    # ended mode (default expects complement sensing)
+    ifeq ($(TC3_CFG_DFLASH_SINGLE_ENDED),1)
+      CFLAGS += -DTC3_CFG_DFLASH_SINGLE_ENDED
+    endif
+
+    # Makefile shennanigans for "if (WOLFHSM_CLIENT==1 || WOLFHSM_SERVER==1)"
+    ifneq ($(filter 1,$(WOLFHSM_CLIENT) $(WOLFHSM_SERVER)),)
+      # Common wolfHSM port files
+      CFLAGS += -I$(WOLFHSM_INFINEON_TC3XX)/port -DWOLFHSM_CFG_DMA \
+                -DWOLFHSM_CFG_NO_SYS_TIME
+      OBJS += $(WOLFHSM_INFINEON_TC3XX)/port/tchsm_common.o \
+              $(WOLFHSM_INFINEON_TC3XX)/port/tchsm_hsmhost.o
+      # General wolfHSM files
+      OBJS += $(WOLFBOOT_LIB_WOLFHSM)/src/wh_transport_mem.o
+
+      # NVM image generation variables
+      WH_NVM_BIN ?= whNvmImage.bin
+      WH_NVM_HEX ?= whNvmImage.hex
+      # NVM partition is half of DFLASH1; bank size depends on sensing mode
+      ifeq ($(TC3_CFG_DFLASH_SINGLE_ENDED),1)
+        WH_NVM_PART_SIZE ?= 0x10000
+      else
+        WH_NVM_PART_SIZE ?= 0x8000
+      endif
+      # Default to base of HSM DFLASH1
+      WH_NVM_BASE_ADDRESS ?= 0xAFC00000
+
+      # Select config file based on certificate chain verification
+      # Use ?= to allow user override via command line (e.g., for offline cert chain)
+      ifneq ($(CERT_CHAIN_VERIFY),)
+        NVM_CONFIG ?= tools/scripts/tc3xx/wolfBoot-wolfHSM-dummy-certchain.nvminit
+      else
+        NVM_CONFIG ?= tools/scripts/tc3xx/wolfBoot-wolfHSM-keys.nvminit
+      endif
+    endif
+
+    # Set BOOT_IMG to the ELF file instead of default bin when ELF_FLASH_SCATTER is enabled
+    ifeq ($(ELF_FLASH_SCATTER),1)
+      BOOT_IMG=test-app/image.elf
+    endif
+
+    ifeq ($(TARGET), aurix_tc3xx_hsm)
+      # HSM core (ARM Cortex-M3)
+      ARCH_FLASH_OFFSET?=0x80028000
+
+      # wolfHSM server ECC configs use hardware-only ECC via the PKC crypto
+      # callback. Cert manager uses INVALID_DEVID for signature checks so register
+      # a find callback to ensure these use HW acceleration as well.
+      ifeq ($(WOLFHSM_SERVER),1)
+        ifneq (,$(filter ECC%,$(SIGN)))
+          # if SIGN==ECC
+          CFLAGS+=-DWOLF_CRYPTO_CB_ONLY_ECC -DWOLF_CRYPTO_CB_FIND
+        endif
+      endif
+
+      ifeq ($(GCC),1)
+        # Open-source ARM GCC
+        CROSS_COMPILE?=arm-none-eabi-
+      else ifeq ($(HT_LLVM),1)
+        # HighTec ARM LLVM (clang + lld + picolibc)
+        HT_ARM_PATH?=$(HOME)/HighTec/toolchains/arm/v10.0.0
+        CC=$(HT_ARM_PATH)/bin/clang
+        LD=$(CC)
+        AS=$(CC)
+        AR=$(HT_ARM_PATH)/bin/llvm-ar
+        OBJCOPY=$(HT_ARM_PATH)/bin/llvm-objcopy
+        SIZE=$(HT_ARM_PATH)/bin/llvm-size
+        # clang applies warning flags positionally, so skip the main
+        # Makefile's late USE_GCC_HEADLESS -Wall/-Wextra block (it would
+        # re-enable warnings suppressed above)
+        USE_GCC_HEADLESS:=0
+      else
+        # HighTec ARM GCC (the default)
+        HT_ARM_GCC_PATH?=/opt/hightec/gnuarm_v4.6.5.1-3b75921-lin64
+        CROSS_COMPILE?=$(HT_ARM_GCC_PATH)/bin/arm-elf-
+      endif
+
+      # Compiler flags
+      ifeq ($(NO_ASM),1)
+        ifeq ($(SPMATH),1)
+          MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+        endif
+      else
+        ifeq ($(SPMATH),1)
+          CFLAGS+=-DWOLFSSL_SP_ASM -DWOLFSSL_SP_ARM_CORTEX_M_ASM -DWOLFSSL_SP_NO_UMAAL
+          MATH_OBJS += $(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_cortexm.o
+          CFLAGS+=$(CORTEXM_ARM_EXTRA_CFLAGS) -DWOLFSSL_ARM_ARCH=7
+        endif
+      endif
+
+      CFLAGS += -march=armv7-m -mcpu=cortex-m3 -mthumb -mlittle-endian \
+                -fno-builtin
+
+      # Temporary fix masking wolfCrypt unused function warning with RSA_LOW_MEM
+      CFLAGS += -Wno-unused-function
+
+      ifeq ($(HT_LLVM),1)
+        # gnu11 overrides the earlier gnu99: clang rejects wolfSSL's typedef
+        # redefinitions under C99. clang also lacks GCC's per-function
+        # optimize attribute used by WC_OMIT_FRAME_POINTER, so define it
+        # empty and omit frame pointers globally (required for SP inline ASM)
+        CFLAGS += -std=gnu11 -fomit-frame-pointer -DWC_OMIT_FRAME_POINTER=
+        # picolibc stdio calls the POSIX fd functions (write etc.) and the
+        # port's syscalls.c provides them on top of __io_putchar
+        OBJS += $(WOLFHSM_INFINEON_TC3XX)/port/server/syscalls.o
+      endif
+
+      LDFLAGS += -march=armv7-m -mcpu=cortex-m3 -mthumb -mlittle-endian -g \
+                -Wl,--gc-sections -static -Wl,--cref -Wl,-n \
+                -ffunction-sections -fdata-sections \
+                -nostartfiles \
+                -Wl,-Map="wolfboot.map" \
+                -Wl,-L$(TC3_DIR)/tc3
+
+      ifeq ($(HT_GCC),1)
+        # HighTec libgcc references ARM unwind symbols, but .ARM.exidx is
+        # discarded. Define empty bounds and stub the personality routines to
+        # avoid pulling in ~3.4KB of unneccessary unwinder code.
+        LDFLAGS += -Wl,--defsym,__exidx_start=0 -Wl,--defsym,__exidx_end=0 \
+                   -Wl,--defsym,__aeabi_unwind_cpp_pr0=0 \
+                   -Wl,--defsym,__aeabi_unwind_cpp_pr1=0 \
+                   -Wl,--defsym,__aeabi_unwind_cpp_pr2=0
+        # HighTec's ancient ARM ld cannot parse the BSP linker-script fragments.
+        # Flatten them at parse time with the wolfHSM port's ld-flatten.sh.
+        # Paths are relative to this arch.mk, which is included from both the
+        # wolfBoot root and test-app directories.
+        ARCHMK_DIR:=$(dir $(lastword $(MAKEFILE_LIST)))
+        LSCRIPT_IN=$(ARCHMK_DIR)config/$(TARGET)_flat.ld
+        ifeq ($(filter clean keysclean,$(MAKECMDGOALS)),)
+          LD_FLATTEN_OUT:=$(shell $(WOLFHSM_INFINEON_TC3XX)/tchsm-server/ld-flatten.sh \
+                            $(ARCHMK_DIR)hal/$(TARGET).ld $(LSCRIPT_IN) $(TC3_DIR)/tc3 && echo OK)
+          ifneq ($(LD_FLATTEN_OUT),OK)
+            $(error ld-flatten.sh failed for hal/$(TARGET).ld)
+          endif
+        endif
+      else ifeq ($(HT_LLVM),1)
+        # picolibc: no specs files, lld parses the BSP scripts directly
+      else
+        # newlib-nano (arm-none-eabi)
+        LDFLAGS += --specs=nano.specs
+      endif
+
+      # wolfHSM port server-specific files
+      ifeq ($(WOLFHSM_SERVER),1)
+        USE_GCC_HEADLESS=0
+
+        CFLAGS += -I$(WOLFHSM_INFINEON_TC3XX)/port/server
+
+        OBJS += $(WOLFHSM_INFINEON_TC3XX)/port/server/port_halflash_df1.o \
+          $(WOLFHSM_INFINEON_TC3XX)/port/server/sysmem.o \
+          $(WOLFHSM_INFINEON_TC3XX)/port/server/tchsm_hh_hsm.o \
+          $(WOLFHSM_INFINEON_TC3XX)/port/server/tchsm_utils.o\
+          $(WOLFHSM_INFINEON_TC3XX)/port/server/ccb_hsm.o \
+          $(WOLFHSM_INFINEON_TC3XX)/port/server/tchsm_hash.o \
+          $(WOLFHSM_INFINEON_TC3XX)/port/server/tchsm_aes.o \
+          $(WOLFHSM_INFINEON_TC3XX)/port/server/tchsm_cmac.o \
+          $(WOLFHSM_INFINEON_TC3XX)/port/server/tchsm_pk.o \
+          $(WOLFHSM_INFINEON_TC3XX)/port/server/tchsm_trng.o
+      endif
+
+      # HSM BSP specific object files
+      OBJS += $(TC3_DIR)/src/tc3_clock.o \
+              $(TC3_DIR)/src/tc3_flash.o \
+              $(TC3_DIR)/src/tc3_gpio.o \
+              $(TC3_DIR)/src/tc3_uart.o \
+              $(TC3_DIR)/src/tc3.o \
+              $(TC3_DIR)/src/tc3arm.o \
+              $(TC3_DIR)/src/tc3arm_crt.o \
+              $(TC3_DIR)/../tc3arm_bootloader/tc3arm_bootloader.o
+
+    else
+      # TriCore host core
+      ARCH_FLASH_OFFSET?=0x800A0000
+      ifeq ($(GCC),1)
+        TRICORE_GCC_PATH?=$(HOME)/workspace/toolchains/tricore-gcc-13.4.1-linux
+        CROSS_COMPILE?=$(TRICORE_GCC_PATH)/bin/tricore-elf-
+        # Open GCC has a bug in data section naming, eliminate this for now
+        CFLAGS:=$(filter-out -fdata-sections,$(CFLAGS))
+        # Required for open GCC compatibility with wolfLLD-tc3xx bus error
+        # skipping logic. By default, open GCC memcpy uses a post-increment load
+        # so without this, bus error skip logic will result in an infinite loop
+        # when wolfBoot reads from erased flash.
+        CFLAGS+=-fno-auto-inc-dec
+      else ifeq ($(HT_LLVM),1)
+        HT_TRICORE_LLVM_PATH?=$(HOME)/HighTec/toolchains/tricore/v11.0.0
+        CC=$(HT_TRICORE_LLVM_PATH)/bin/clang
+        LD=$(CC)
+        AS=$(CC)
+        AR=$(HT_TRICORE_LLVM_PATH)/bin/llvm-ar
+        OBJCOPY=$(HT_TRICORE_LLVM_PATH)/bin/llvm-objcopy
+        SIZE=$(HT_TRICORE_LLVM_PATH)/bin/llvm-size
+      else
+        HT_ROOT?=/opt/hightec/gnutri_v4.9.4.1-11fcedf-lin64
+        CROSS_COMPILE?=$(HT_ROOT)/bin/tricore-
+      endif
+
+      # No asm for you!
+      MATH_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+
+      # Arch settings for tricore
+      ifeq ($(USE_GCC),1)
+        CFLAGS+= -fshort-double -mtc162 -fstrict-volatile-bitfields -fno-builtin \
+                 -fno-strict-aliasing
+      else
+        # Use hardware FP with 32-bit doubles, matching GCC's # -fshort-double.
+        # Limit clang inlining by callee stack size.
+        # Use gnu11 because clang rejects wolfSSL's typedef redefinitions  under gnu99.
+        CFLAGS+= -march=tc162 -mfloat-abi=hh32 -finline-max-stacksize=4096 \
+                 -std=gnu11 -ffreestanding -Wno-unused-function
+
+        # clang applies warning flags positionally, so skip the main
+        # Makefile's late USE_GCC_HEADLESS -Wall/-Wextra block (it would
+        # re-enable warnings suppressed above)
+        USE_GCC_HEADLESS:=0
+      endif
+
+      DEBUG_AFLAGS= -Wa,--gdwarf-2
+
+      # Linker flags
+      ifeq ($(USE_GCC),1)
+        LDFLAGS+= -fshort-double -mtc162 -nostartfiles -Wl,--extmap="a"
+      else
+        LDFLAGS+= -march=tc162 -mfloat-abi=hh32 -Wl,--entry=tc3tc_start
+      endif
+
+      LDFLAGS+= -Wl,--gc-sections -Wl,--cref -Wl,-n \
+                -ffunction-sections -fdata-sections \
+                -Wl,-Map="wolfboot.map" \
+                -Wl,-L$(TC3_DIR)/tc3
+
+      # Tricore BSP layer (replace with only tricore specific stuff)
+      OBJS += $(TC3_DIR)/src/tc3_clock.o \
+              $(TC3_DIR)/src/tc3_flash.o \
+              $(TC3_DIR)/src/tc3_gpio.o \
+              $(TC3_DIR)/src/tc3_uart.o \
+              $(TC3_DIR)/src/tc3.o \
+              $(TC3_DIR)/src/tc3tc_isr.o \
+              $(TC3_DIR)/src/tc3tc_traps.o \
+              $(TC3_DIR)/src/tc3tc.o \
+              $(TC3_DIR)/src/tc3tc_crt.o \
+              $(TC3_DIR)/../tc3tc_bootloader/tc3tc_bootloader.o
+
+      ifeq ($(WOLFHSM_CLIENT),1)
+        # GNU enables io.c's write() stub, which picolibc (HT_LLVM) needs
+        CFLAGS += -I$(WOLFHSM_INFINEON_TC3XX)/port/client -DGNU
+        OBJS += $(WOLFHSM_INFINEON_TC3XX)/port/client/hsm_ipc.o \
+                $(WOLFHSM_INFINEON_TC3XX)/port/client/io.o \
+                $(WOLFHSM_INFINEON_TC3XX)/port/client/tchsm_hh_host.o
+      endif
+
+    endif # !aurix_tc3xx_hsm
+  endif # TC3xx
+
+  ifneq (,$(filter aurix_tc4xx aurix_tc4xx_csrm,$(TARGET)))
+	# TC4xx
+    USE_GCC?=1
+    ARCH_FLASH_OFFSET?=0x80000000
+
+    # wolfHSM TC4xx port root. Expected that wolfBoot is inside as a submodule.
+    WOLFHSM_INFINEON_TC4XX?=$(abspath ..)
+    TC4_LLD_DIR?=$(WOLFHSM_INFINEON_TC4XX)/drivers
+    TC4_WB_DIR?=$(WOLFHSM_INFINEON_TC4XX)/port/wolfboot
+
+    # TC4 derivative device selection from the port device.mk.
+    include $(WOLFHSM_INFINEON_TC4XX)/device.mk
+    # wolfHSM port objects and flags.
+    include $(TC4_WB_DIR)/tchsm_wolfboot.mk
+
+    CROSS_COMPILE?=tricore-elf-
+
+    CFLAGS += -mcpu=$(DEV_MCPU) -D$(DEV_MACRO) $(DEV_XTAL_DEF) \
+              $(DEV_GCC13_CFLAGS)
+    CFLAGS += -Wall -fno-common -fstrict-volatile-bitfields \
+              -ffunction-sections -fno-builtin -std=gnu99 \
+              -DPART_BOOT_EXT -DPART_UPDATE_EXT -DPART_SWAP_EXT \
+              -DWOLFBOOT_LOADER_MAIN
+    # Vendor iLLD sources trip some -Wextra diagnostics
+    CFLAGS += -Wno-missing-field-initializers -Wno-unused-parameter \
+              -Wno-unused-variable -Wno-sign-compare -Wno-type-limits
+
+    # iLLD include paths. SSW configuration differs per core.
+    ifeq ($(TARGET), aurix_tc4xx_csrm)
+      CFLAGS += -I$(TC4_WB_DIR)/csrm -I$(TC4_WB_DIR)/csrm/Cfg_Ssw
+    else
+      CFLAGS += -I$(TC4_WB_DIR) -I$(TC4_WB_DIR)/Cfg_Ssw
+    endif
+
+    # Linker scripts ship with the port, not in hal/.
+    ifeq ($(TARGET), aurix_tc4xx_csrm)
+      LSCRIPT_IN=$(TC4_WB_DIR)/csrm/aurix_tc4xx_csrm.ld
+    else
+      LSCRIPT_IN=$(TC4_WB_DIR)/aurix_tc4xx.ld
+    endif
+    CFLAGS += \
+      -I$(TC4_LLD_DIR) \
+      -I$(TC4_LLD_DIR)/Infra/Ssw/TC4xx/Csrm \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Csrm \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Csrm/Cpu/Trap \
+      -I$(TC4_LLD_DIR)/Infra \
+      -I$(TC4_LLD_DIR)/Infra/Platform \
+      -I$(TC4_LLD_DIR)/Infra/Platform/Compilers \
+      -I$(TC4_LLD_DIR)/Infra/Sfr \
+      -I$(TC4_LLD_DIR)/Infra/Sfr/$(DEV_DERIV) \
+      -I$(TC4_LLD_DIR)/Infra/Ssw \
+      -I$(TC4_LLD_DIR)/Infra/Ssw/TC4xx \
+      -I$(TC4_LLD_DIR)/Infra/Ssw/TC4xx/Tricore \
+      -I$(TC4_LLD_DIR)/Service \
+      -I$(TC4_LLD_DIR)/Service/CpuGeneric \
+      -I$(TC4_LLD_DIR)/Service/CpuGeneric/If \
+      -I$(TC4_LLD_DIR)/Service/CpuGeneric/If/Ccu6If \
+      -I$(TC4_LLD_DIR)/Service/CpuGeneric/StdIf \
+      -I$(TC4_LLD_DIR)/Service/CpuGeneric/SysSe \
+      -I$(TC4_LLD_DIR)/Service/CpuGeneric/SysSe/Bsp \
+      -I$(TC4_LLD_DIR)/Service/CpuGeneric/SysSe/General \
+      -I$(TC4_LLD_DIR)/Service/CpuGeneric/SysSe/Time \
+      -I$(TC4_LLD_DIR)/Service/CpuGeneric/_Utilities \
+      -I$(TC4_LLD_DIR)/Service/Tricore \
+      -I$(TC4_LLD_DIR)/Service/Tricore/Comm \
+      -I$(TC4_LLD_DIR)/Service/Tricore/Math \
+      -I$(TC4_LLD_DIR)/iLLD \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Ap \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Ap/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Asclin \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Asclin/Asc \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Asclin/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Clock \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Clock/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Egtm \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Egtm/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Geth \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Geth/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Port \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Port/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Src \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Src/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_Impl \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_Impl/$(DEV_DERIV) \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_Lib \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_Lib/DataHandling \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_Lib/Timer \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_PinMap \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_PinMap/$(DEV_DERIV) \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Cpu \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Cpu/Irq \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Cpu/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Cpu/Trap \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Flash/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Smu \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Smu/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Stm \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Stm/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Vmt \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Vmt/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Wtu \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Wtu/Std \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/_Impl \
+      -I$(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/_Impl/$(DEV_DERIV)
+
+    # No TriCore asm in wolfCrypt
+    MATH_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/sp_c32.o
+
+    # wolfHSM port CommBuf placement, used by the linker scripts too.
+    CFLAGS += $(TCHSM_WB_CFLAGS)
+    LDFLAGS += $(TCHSM_WB_LDFLAGS)
+
+    # wolfHSM support
+    ifneq ($(filter 1,$(WOLFHSM_CLIENT) $(WOLFHSM_SERVER)),)
+      # Common wolfHSM port files.
+      CFLAGS += $(TCHSM_WB_WOLFHSM_CFLAGS) -DWOLFHSM_CFG_DMA \
+                -DWOLFHSM_CFG_NO_SYS_TIME
+      OBJS += $(TCHSM_WB_WOLFHSM_OBJS)
+      OBJS += $(WOLFBOOT_LIB_WOLFHSM)/src/wh_transport_mem.o
+
+      # NVM image variables for the server key store.
+      WH_NVM_BIN ?= whNvmImage.bin
+      WH_NVM_HEX ?= whNvmImage.hex
+      WH_NVM_PART_SIZE ?= 0x8000
+      WH_NVM_BASE_ADDRESS ?= 0xAE800000
+      WH_NVM_TOOL_FLAGS ?=
+      WH_NVM_HEX_ALIGN ?= 8
+      NVM_CONFIG ?= tools/scripts/tc4xx/wolfBoot-wolfHSM-keys.nvminit
+    endif
+
+    ifeq ($(WOLFHSM_CLIENT),1)
+      # Client transport bring-up files.
+      CFLAGS += $(TCHSM_WB_CLIENT_CFLAGS)
+      OBJS += $(TCHSM_WB_CLIENT_OBJS)
+    endif
+
+    ifeq ($(TARGET), aurix_tc4xx_csrm)
+      CFLAGS += -msoft-sp-float -msoft-dp-float
+      LDFLAGS += -msoft-sp-float -msoft-dp-float
+      # Full-system CSRM wolfBoot target leaves host release to tchsm-server.
+      ifeq ($(AURIX_TC4_FULLSYS),1)
+        CFLAGS += -DWOLFBOOT_AURIX_TC4XX_FULLSYS
+        LSCRIPT_IN=$(TC4_WB_DIR)/csrm/aurix_tc4xx_csrm_fullsys.ld
+      endif
+    endif
+
+    LDFLAGS += -mcpu=$(DEV_MCPU) -Wl,--cref -Wl,-Map="wolfboot.map"
+
+	# Remove UCB, BMHD, and other empty but loadable elf sections from wolfBoot.bin
+	# such that the binary image can be contiguous
+    OBJCOPY_FLAGS+=-R '.bmhd*' -R '.usercfg*' -R '.csusercfg*' -R '.sdata4' -R '.sdata' -R '.zdata'
+
+    # iLLD startup software and drivers used by the HAL.
+    TC4_LLD_SRCS := \
+      $(wildcard $(TC4_LLD_DIR)/Infra/Platform/Compilers/*.c) \
+      $(TC4_LLD_DIR)/Infra/Ssw/TC4xx/Tricore/Ifx_Ssw_Infra.c \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Ap/Std/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Asclin/Std/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Clock/Std/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Port/Std/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/Src/Std/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_Impl/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_Impl/$(DEV_DERIV)/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_PinMap/IfxAsclin_PinMap*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/CpuGeneric/_PinMap/$(DEV_DERIV)/IfxAsclin_PinMap*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Cpu/Std/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Stm/Std/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Wtu/Std/*.c) \
+      $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/_Impl/*.c)
+
+    ifeq ($(TARGET), aurix_tc4xx_csrm)
+      # CSRM (CPU6) startup software + trap table
+      TC4_LLD_SRCS += \
+        $(TC4_LLD_DIR)/Infra/Ssw/TC4xx/Csrm/Ifx_Ssw_Tc6.c \
+        $(TC4_LLD_DIR)/iLLD/TC4xx/Csrm/Cpu/Trap/IfxCpu_Trap_Cs.c
+      OBJS += $(TC4_LLD_SRCS:.c=.o)
+      OBJS += $(TC4_WB_DIR)/csrm/Cfg_Ssw/Ifx_Cfg_Ssw.o \
+              $(TC4_WB_DIR)/csrm/Cfg_Ssw/Ifx_Cfg_SswBmhdCs.o \
+              $(TC4_WB_DIR)/csrm/tc4_wolfboot_csrm_main.o
+    else
+      # Host CPU0 startup software and trap table.
+      TC4_LLD_SRCS += \
+        $(TC4_LLD_DIR)/Infra/Ssw/TC4xx/Tricore/Ifx_Ssw_Tc0.c \
+        $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Cpu/Irq/*.c) \
+        $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Cpu/Trap/*.c) \
+        $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Smu/Std/*.c) \
+        $(wildcard $(TC4_LLD_DIR)/iLLD/TC4xx/Tricore/Vmt/Std/*.c)
+      OBJS += $(TC4_LLD_SRCS:.c=.o)
+      OBJS += $(TC4_WB_DIR)/Cfg_Ssw/Ifx_Cfg_Ssw.o \
+              $(TC4_WB_DIR)/Cfg_Ssw/Ifx_Cfg_SswBmhd.o \
+              $(TC4_WB_DIR)/tc4_wolfboot_main.o
+    endif
+  endif # TC4xx
+endif
+
+CFLAGS+=-DARCH_FLASH_OFFSET=$(ARCH_FLASH_OFFSET)
+BOOT_IMG?=test-app/image.bin
+
+# When ELF loading is enabled, sign the ELF file (not the flat binary)
+ifeq ($(ELF),1)
+  BOOT_IMG=test-app/image.elf
+endif
+
+## Update mechanism
+ifeq ($(ARCH),AARCH64)
+ifeq ($(TARGET),aarch64_efi)
+  # UEFI app: UEFI owns MMU/FDT, so skip the -DMMU/-DWOLFBOOT_FDT DTS path and
+  # fdt.o/gpt.o (like x86_64_efi). update_ram.o is set in the block above.
+  # DEBUG=1: route wolfBoot_printf to the UEFI console (gnu-efi Print).
+  ifeq ($(DEBUG),1)
+    CFLAGS += -DWOLFBOOT_DEBUG_EFI=1
+    # Drop -Werror only here: WOLFBOOT_DEBUG_EFI pulls gnu-efi headers into every
+    # TU and efidebug.h redefines the -DDEBUG object macro (added by DEBUG=1) as
+    # a function macro. That cpp macro-redefinition warning has no -W name, so it
+    # can't be scoped with -Wno-error=<name>; our own sources stay warning-clean.
+    CFLAGS := $(filter-out -Werror,$(CFLAGS))
+  endif
+else
+  CFLAGS+=-DMMU -DWOLFBOOT_FDT -DWOLFBOOT_DUALBOOT
+  OBJS+=src/fdt.o
+  # src/gpt.c provides the CRC32 helpers reused by update_ram.c's uImage
+  # header validator under WOLFBOOT_UBOOT_LEGACY (zynq, versal). Also
+  # needed for the disk variant. Targets without WOLFBOOT_UBOOT_LEGACY or
+  # disk support (e.g. nxp_ls1028a) GC the unused code via --gc-sections.
+  OBJS+=src/gpt.o
+  ifneq ($(filter 1,$(DISK_SDCARD) $(DISK_EMMC)),)
+    # Disk-based boot (SD card or eMMC)
+    CFLAGS+=-DWOLFBOOT_UPDATE_DISK
+    ifeq ($(MAX_DISKS),)
+      MAX_DISKS=1
+    endif
+    CFLAGS+=-DMAX_DISKS=$(MAX_DISKS)
+    UPDATE_OBJS:=src/update_disk.o
+    OBJS+=src/disk.o
+  else
+    # RAM-based boot from external flash (default)
+    UPDATE_OBJS:=src/update_ram.o
+  endif
+endif
+else
+  ifeq ($(DUALBANK_SWAP),1)
+    CFLAGS+=-DWOLFBOOT_DUALBOOT
+    UPDATE_OBJS:=src/update_flash_hwswap.o
+  endif
+endif
+
+## For library target disable partitions
+ifeq ($(TARGET),library)
+  WOLFBOOT_NO_PARTITIONS=1
+  NO_LOADER=1
+endif
+
+ifeq ($(TARGET),library_fs)
+  EXT_FLASH=1
+  # Force all partitions to be marked as external
+  NO_XIP=1
+  NO_SWAP_EXT=
+  NO_LOADER=1
+  USE_GCC_HEADLESS=0
+  CFLAGS+=-DWOLFBOOT_USE_STDLIBC
+endif
+
+
+## Set default update object
+ifneq ($(WOLFBOOT_NO_PARTITIONS),1)
+  ifeq ($(UPDATE_OBJS),)
+    UPDATE_OBJS:=./src/update_flash.o
+  endif
+endif
+
+## wolfBoot origin
+ifeq ($(WOLFBOOT_ORIGIN),)
+  WOLFBOOT_ORIGIN=$(ARCH_FLASH_OFFSET)
+endif
+CFLAGS+=-DWOLFBOOT_ORIGIN=$(WOLFBOOT_ORIGIN)
+CFLAGS+=-DBOOTLOADER_PARTITION_SIZE=$(BOOTLOADER_PARTITION_SIZE)
+
+## Debug
+WOLFCRYPT_OBJS+=$(WOLFBOOT_LIB_WOLFSSL)/wolfcrypt/src/logging.o
+
+# Debug UART
+ifeq ($(DEBUG_UART),1)
+  CFLAGS+=-DDEBUG_UART
+
+  # If this target has a UART driver, add it to the OBJS. When WOLFHAL=1,
+  # the wolfHAL board.mk pulls in its own UART driver and hal/wolfhal.c
+  # provides uart_write; the legacy driver would collide on uart_write.
+  ifneq ($(WOLFHAL),1)
+    ifneq (,$(wildcard hal/uart/uart_drv_$(TARGET).c))
+      OBJS+=hal/uart/uart_drv_$(TARGET).o
+    endif
+  endif
+endif
+
+# UART QSPI programmer (PolarFire SoC MPFS): receive binary over UART and
+# write it directly to QSPI flash. Requires EXT_FLASH=1 and DEBUG_UART=1.
+# Use tools/scripts/mpfs_qspi_prog.py on the host side.
+ifeq ($(UART_QSPI_PROGRAM),1)
+  CFLAGS+=-DUART_QSPI_PROGRAM
+endif
+
+ifeq ($(NXP_CUSTOM_DCD),1)
+  CFLAGS+=-DNXP_CUSTOM_DCD
+  OBJS+=$(NXP_CUSTOM_DCD_OBJS)
+endif
+
+ifeq ($(BIG_ENDIAN),1)
+  CFLAGS+=-D"BIG_ENDIAN_ORDER"
+endif
+
+CFLAGS+=-DWOLFBOOT_ARCH_$(ARCH)
+CFLAGS+=-DTARGET_$(TARGET)

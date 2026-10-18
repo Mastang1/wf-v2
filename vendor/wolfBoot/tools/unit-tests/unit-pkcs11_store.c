@@ -1,0 +1,1110 @@
+/* unit-pkcs11_store.c
+ *
+ * Unit test for PKCS11 storage module
+ *
+ *
+ * Copyright (C) 2026 wolfSSL Inc.
+ *
+ * This file is part of wolfBoot.
+ *
+ * wolfBoot is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfBoot is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
+ */
+
+/* Option to enable sign tool debugging */
+/* Must also define DEBUG_WOLFSSL in user_settings.h */
+#define WOLFBOOT_HASH_SHA256
+#define EXT_FLASH
+#define PART_UPDATE_EXT
+#define NVM_FLASH_WRITEONCE
+
+#if defined(ENCRYPT_WITH_AES256) || defined(ENCRYPT_WITH_AES128)
+    #define WOLFSSL_AES_COUNTER
+    #define WOLFSSL_AES_DIRECT
+#endif
+#if defined(ENCRYPT_WITH_AES256)
+    #define WOLFSSL_AES_256
+#endif
+#if defined(ENCRYPT_WITH_CHACHA)
+    #define HAVE_CHACHA
+#endif
+#define ECC_TIMING_RESISTANT
+
+#define KEYSTORE_PUBKEY_SIZE KEYSTORE_PUBKEY_SIZE_ECC256
+
+
+#include <stdio.h>
+#include <check.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#define XMALLOC_OVERRIDE
+#define XMALLOC(n,h,t) malloc(n)
+#define XFREE(p,h,t) free(p)
+
+#include "user_settings.h"
+#include "wolfssl/wolfcrypt/sha.h"
+#include "wolfssl/wolfcrypt/error-crypt.h"
+#include "wolfboot/wolfboot.h"
+#include "wolfpkcs11/pkcs11.h"
+#include "hal.h"
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+
+#define MOCK_ADDRESS 0xCF000000
+uint8_t *vault_base = (uint8_t *)MOCK_ADDRESS;
+
+/* Backing file for the mock keyvault. Made unique per process (see main()) so
+ * concurrent test runs do not collide on a shared /tmp path, with a usable
+ * default in case a test is ever driven without main() initializing it. */
+char vault_path[64] = "/tmp/wolfboot-unit-keyvault.bin";
+#include "unit-keystore.c"
+#include "pkcs11_store.c"
+const uint32_t keyvault_size = KEYVAULT_OBJ_SIZE * KEYVAULT_MAX_ITEMS + 2 * WOLFBOOT_SECTOR_SIZE;
+#include "unit-mock-flash.c"
+
+#include "txt_filler.h"
+
+char dante_filler[KEYVAULT_OBJ_SIZE] = DANTE_FILLER;
+
+START_TEST (test_store_and_load_objs) {
+    CK_ULONG id_tok, id_obj;
+    int type;
+    int ret, readonly;
+    void *store = NULL;
+    char secret1[] = "Everyone gets Friday off.";
+    char secret2[] = "This is just a test string.";
+    char short_string[] = "Short string";
+    char secret_rd[KEYVAULT_OBJ_SIZE];
+
+    type = DYNAMIC_TYPE_ECC;
+    id_tok = 1;
+    id_obj = 12;
+    readonly = 0;
+    ret = mmap_file(vault_path, vault_base,
+            keyvault_size, NULL);
+    ck_assert(ret == 0);
+    memset(vault_base, 0xEE, keyvault_size);
+    /* Open the vault, create the object */
+    fprintf(stderr, "Opening the vault\n");
+    printf("Flash Keyvault: %p\n", vault_base);
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to open the vault: %d", ret);
+    ck_assert_msg(store != NULL, "Did not receive a store address");
+    fprintf(stderr, "open successful\n");
+
+    /* Test two subsequent writes */
+    ret = wolfPKCS11_Store_Write(store, secret1, strlen(secret1) + 1);
+    ck_assert_int_eq(ret, strlen(secret1) + 1);
+    ret = wolfPKCS11_Store_Write(store, secret2, strlen(secret2) + 1);
+    ck_assert_int_eq(ret, strlen(secret2) + 1);
+    wolfPKCS11_Store_Close(store);
+    printf("Closed vault. Reopening in RO mode\n");
+
+    /* Reopen for reading */
+    readonly = 1;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to reopen the vault in read-only mode: %d", ret);
+
+    /* Read out the content */
+    ret = wolfPKCS11_Store_Read(store, secret_rd, 128);
+    ck_assert(ret == strlen(secret1) + strlen(secret2) + 2);
+    ck_assert(strcmp(secret1, secret_rd) == 0);
+    ck_assert(strcmp(secret2, secret_rd + 1 + strlen(secret1)) == 0);
+    wolfPKCS11_Store_Close(store);
+
+    /* Create a second object with same Ids, different type*/
+    type = DYNAMIC_TYPE_RSA;
+    readonly = 0;
+    fprintf(stderr, "Opening the second vault\n");
+    printf("Flash Keyvault: %p\n", vault_base);
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to open the 2nd vault: %d", ret);
+    ck_assert_msg(store != NULL, "Did not receive a store address for 2nd vault");
+    fprintf(stderr, "open 2 successful\n");
+    ret = wolfPKCS11_Store_Write(store, secret2, strlen(secret2) + 1);
+    wolfPKCS11_Store_Close(store);
+
+    /* Reopen for reading */
+    readonly = 1;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to reopen the vault in read-only mode: %d", ret);
+    /* Read out the content */
+    ret = wolfPKCS11_Store_Read(store, secret_rd, 128);
+    ck_assert(ret == strlen(secret2) + 1);
+    ck_assert(strcmp(secret2, secret_rd) == 0);
+    wolfPKCS11_Store_Close(store);
+
+    /* Create more similar objects, different secret */
+    type = DYNAMIC_TYPE_RSA;
+    id_tok = 2;
+    id_obj = 22;
+    readonly = 0;
+    fprintf(stderr, "Creating one more vault\n");
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to create vault: %d", ret);
+    ck_assert_msg(store != NULL, "Did not receive a store address for vault");
+    fprintf(stderr, "open 2 successful\n");
+    ret = wolfPKCS11_Store_Write(store, secret1, strlen(secret1) + 1);
+
+    id_tok = 3;
+    id_obj = 23;
+    readonly = 0;
+    fprintf(stderr, "Creating one more vault\n");
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to create vault: %d", ret);
+    ck_assert_msg(store != NULL, "Did not receive a store address for vault");
+    fprintf(stderr, "open 2 successful\n");
+    ret = wolfPKCS11_Store_Write(store, secret1, strlen(secret1) + 1);
+    wolfPKCS11_Store_Close(store);
+
+    /* Reopen for reading */
+    id_tok = 1;
+    id_obj = 12;
+    readonly = 1;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to reopen the vault in read-only mode: %d", ret);
+    /* Read out the content */
+    ret = wolfPKCS11_Store_Read(store, secret_rd, 128);
+    ck_assert(ret == strlen(secret2) + 1);
+    ck_assert(strcmp(secret2, secret_rd) == 0);
+    wolfPKCS11_Store_Close(store);
+
+    /* Open non-existing vaults */
+    id_tok = 5;
+    readonly = 1;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret != 0, "Returned with success with invalid id_tok %d", id_tok);
+    id_tok = 2;
+    id_obj = 0;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret != 0, "Returned with success with invalid id_obj %d", id_obj);
+    type = 0xFF;
+    id_tok = 2;
+    id_obj = 23;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret != 0, "Returned with success with invalid type %d", type);
+
+    /* Test backup recovery for allocation table */
+    memset(vault_base, 0xEE, WOLFBOOT_SECTOR_SIZE);
+    type = DYNAMIC_TYPE_RSA;
+    id_tok = 1;
+    id_obj = 12;
+    readonly = 1;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to reopen the vault recovering from alloc table backup: %d", ret);
+    /* Read out the content */
+    ret = wolfPKCS11_Store_Read(store, secret_rd, 128);
+    ck_assert(ret == strlen(secret2) + 1);
+    ck_assert(strcmp(secret2, secret_rd) == 0);
+    wolfPKCS11_Store_Close(store);
+
+    /* Test backup recovery for object sector */
+    printf("Test recovery sector...\n");
+    memcpy(vault_base + WOLFBOOT_SECTOR_SIZE, vault_base + 0x1800,
+            WOLFBOOT_SECTOR_SIZE);
+    memset(vault_base + 0x1800, 0xEE, WOLFBOOT_SECTOR_SIZE);
+    id_tok = 1;
+    id_obj = 12;
+    readonly = 1;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to reopen the vault recovering from object sector backup: %d", ret);
+    /* Read out the content */
+    ret = wolfPKCS11_Store_Read(store, secret_rd, 128);
+    ck_assert(ret == strlen(secret2) + 1);
+    ck_assert(strcmp(secret2, secret_rd) == 0);
+    wolfPKCS11_Store_Close(store);
+
+    /* Test with very large payload */
+    type = DYNAMIC_TYPE_RSA;
+    id_tok = 3;
+    id_obj = 33;
+    readonly = 0;
+    fprintf(stderr, "Creating one BIG vault\n");
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to create vault: %d", ret);
+    ck_assert_msg(store != NULL, "Did not receive a store address for vault");
+    fprintf(stderr, "open 3.33 successful\n");
+    ret = wolfPKCS11_Store_Write(store, dante_filler, strlen(dante_filler) + 1);
+    wolfPKCS11_Store_Close(store);
+
+    /* Reopen for reading */
+    readonly = 1;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to reopen the vault in read-only mode: %d", ret);
+    /* Read out the content */
+    memset(secret_rd, 0, KEYVAULT_OBJ_SIZE);
+    ret = wolfPKCS11_Store_Read(store, secret_rd, KEYVAULT_OBJ_SIZE);
+    ck_assert_int_eq(ret, strlen(dante_filler) + 1);
+    ck_assert(strncmp(dante_filler, secret_rd, strlen(dante_filler) + 1) == 0);
+    wolfPKCS11_Store_Close(store);
+
+    /* Reopen for writing, test truncate */
+    readonly = 0;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to create vault: %d", ret);
+    ck_assert_msg(store != NULL, "Did not receive a store address for vault");
+    fprintf(stderr, "open 3.33 successful\n");
+    ret = wolfPKCS11_Store_Write(store, short_string, strlen(short_string) + 1);
+    wolfPKCS11_Store_Close(store);
+
+    /* Reopen for reading */
+    readonly = 1;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_msg(ret == 0, "Failed to reopen the vault in read-only mode: %d", ret);
+    /* Read out the content */
+    memset(secret_rd, 0, KEYVAULT_OBJ_SIZE);
+    ret = wolfPKCS11_Store_Read(store, secret_rd, KEYVAULT_OBJ_SIZE);
+    ck_assert(ret == strlen(short_string) + 1);
+    ck_assert(strcmp(short_string, secret_rd) == 0);
+    wolfPKCS11_Store_Close(store);
+
+    /* Remove the object and confirm it is no longer addressable */
+    ret = wolfPKCS11_Store_Remove(type, id_tok, id_obj);
+    ck_assert_msg(ret == 0, "Failed to delete vault: %d", ret);
+
+    readonly = 1;
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, readonly, &store);
+    ck_assert_int_eq(ret, NOT_AVAILABLE_E);
+
+    /* Second removal attempt should report the object is already gone */
+    ret = wolfPKCS11_Store_Remove(type, id_tok, id_obj);
+    ck_assert_int_eq(ret, NOT_AVAILABLE_E);
+}
+END_TEST
+
+START_TEST(test_cross_sector_write_preserves_length)
+{
+    const int type = DYNAMIC_TYPE_RSA;
+    const CK_ULONG id_tok = 7;
+    const CK_ULONG id_obj = 9;
+    void *store = NULL;
+    unsigned char *payload;
+    struct store_handle *handle;
+    int ret;
+
+    payload = malloc(WOLFBOOT_SECTOR_SIZE);
+    ck_assert_ptr_nonnull(payload);
+
+    for (ret = 0; ret < WOLFBOOT_SECTOR_SIZE; ret++)
+        payload[ret] = (unsigned char)(ret & 0xFF);
+
+    ret = mmap_file(vault_path, vault_base,
+            keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xEE, keyvault_size);
+
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, 0, &store);
+    ck_assert_int_eq(ret, 0);
+    ck_assert_ptr_nonnull(store);
+
+    ret = wolfPKCS11_Store_Write(store, payload, WOLFBOOT_SECTOR_SIZE);
+    ck_assert_int_eq(ret, WOLFBOOT_SECTOR_SIZE);
+    handle = store;
+    ck_assert_uint_eq(handle->in_buffer_offset,
+        2 * sizeof(uint32_t) + WOLFBOOT_SECTOR_SIZE);
+    /* The size is tracked live in the (cached) header node; the flash
+     * node is committed when the window is closed. */
+    ck_assert_uint_eq(
+        ((struct obj_hdr *)(sector0_ptr() + STORE_PRIV_HDR_OFFSET))->size,
+        2 * sizeof(uint32_t) + WOLFBOOT_SECTOR_SIZE);
+    wolfPKCS11_Store_Close(store);
+
+    /* After the close the committed node must carry the same size */
+    ck_assert_uint_eq(
+        ((struct obj_hdr *)(vault_base + STORE_PRIV_HDR_OFFSET))->size,
+        2 * sizeof(uint32_t) + WOLFBOOT_SECTOR_SIZE);
+
+    free(payload);
+}
+END_TEST
+
+START_TEST(test_close_clears_handle_state)
+{
+    const int type = DYNAMIC_TYPE_RSA;
+    const CK_ULONG id_tok = 17;
+    const CK_ULONG id_obj = 21;
+    void *store = NULL;
+    struct store_handle *handle;
+    int ret;
+
+    ret = mmap_file(vault_path, vault_base,
+            keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xEE, keyvault_size);
+
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, 0, &store);
+    ck_assert_int_eq(ret, 0);
+    ck_assert_ptr_nonnull(store);
+
+    handle = store;
+    ck_assert_ptr_nonnull(handle->buffer);
+    ck_assert_ptr_nonnull(handle->hdr);
+    ck_assert_uint_ne(handle->in_buffer_offset, 0);
+
+    wolfPKCS11_Store_Close(store);
+
+    ck_assert_uint_eq(handle->flags, 0);
+    ck_assert_uint_eq(handle->pos, 0);
+    ck_assert_ptr_null(handle->buffer);
+    ck_assert_ptr_null(handle->hdr);
+    ck_assert_uint_eq(handle->in_buffer_offset, 0);
+}
+END_TEST
+
+START_TEST(test_delete_object_ignores_metadata_prefix)
+{
+    const int32_t type = DYNAMIC_TYPE_RSA;
+    const uint32_t tok_id = VAULT_HEADER_MAGIC;
+    const uint32_t obj_id = 0x01020308U;
+    uint32_t *words;
+    uint8_t bitmap_before[BITMAP_SIZE];
+    int ret;
+
+    ret = mmap_file(vault_path, vault_base,
+            keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xFF, keyvault_size);
+
+    words = (uint32_t *)vault_base;
+    words[0] = VAULT_HEADER_MAGIC;
+    words[1] = obj_id;
+    words[2] = (uint32_t)type;
+    words[3] = 0;
+    words[4] = 0;
+
+    memcpy(bitmap_before, vault_base + sizeof(uint32_t), BITMAP_SIZE);
+
+    delete_object(type, tok_id, obj_id);
+
+    ck_assert_mem_eq(vault_base + sizeof(uint32_t), bitmap_before, BITMAP_SIZE);
+    ck_assert_uint_eq(((uint32_t *)vault_base)[0], VAULT_HEADER_MAGIC);
+    ck_assert_uint_eq(((uint32_t *)vault_base)[1], obj_id);
+}
+END_TEST
+
+START_TEST(test_delete_object_corrupted_pos_no_oob)
+{
+    const int32_t type = DYNAMIC_TYPE_RSA;
+    const uint32_t tok_id = 0x0A0B0C0DU;
+    const uint32_t obj_id = 0x10203040U;
+    struct obj_hdr *hdr;
+    int ret;
+
+    ret = mmap_file(vault_path, vault_base,
+            keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xFF, keyvault_size);
+
+    /* Valid header magic and zeroed bitmap so check_vault() accepts the
+     * sector without restoring/reinitializing it. */
+    ((uint32_t *)vault_base)[0] = VAULT_HEADER_MAGIC;
+    memset(vault_base + sizeof(uint32_t), 0x00, BITMAP_SIZE);
+
+    /* Simulate a power-fault-corrupted node: valid tok/obj/type but the
+     * 'pos' field was never written and is left as erased flash
+     * (PKCS11_INVALID_ID). delete_object() must not turn this into an
+     * out-of-bounds bitmap_put(0xFFFFFFFF, 0). */
+    hdr = NODES_TABLE;
+    hdr->token_id = tok_id;
+    hdr->object_id = obj_id;
+    hdr->type = type;
+    hdr->pos = PKCS11_INVALID_ID;
+    hdr->size = 2 * sizeof(uint32_t);
+
+    delete_object(type, tok_id, obj_id);
+
+    /* If we get here without a crash, the OOB write was avoided. The node
+     * should also have been invalidated. */
+    ck_assert_uint_eq(NODES_TABLE->token_id, PKCS11_INVALID_ID);
+    ck_assert_uint_eq(NODES_TABLE->object_id, PKCS11_INVALID_ID);
+}
+END_TEST
+
+/* F-12070: a corrupted 'pos' in the node table must not be used to
+ * compute the object address. find_object_buffer() must reject it and
+ * delete the node, not dereference an out-of-range slot. */
+START_TEST(test_find_object_buffer_corrupted_pos_no_oob)
+{
+    const int32_t type = DYNAMIC_TYPE_RSA;
+    const uint32_t tok_id = 0x21222324U;
+    const uint32_t obj_id = 0x60616263U;
+    struct obj_hdr *hdr;
+    int ret;
+
+    ret = mmap_file(vault_path, vault_base,
+            keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xFF, keyvault_size);
+
+    ((uint32_t *)vault_base)[0] = VAULT_HEADER_MAGIC;
+    memset(vault_base + sizeof(uint32_t), 0x00, BITMAP_SIZE);
+
+    hdr = NODES_TABLE;
+    hdr->token_id = tok_id;
+    hdr->object_id = obj_id;
+    hdr->type = type;
+    hdr->pos = KEYVAULT_MAX_ITEMS;
+    hdr->size = 2 * sizeof(uint32_t);
+
+    /* Seed the backup sector with the object id's: without the range
+     * check, the restore path would use the out-of-range slot. */
+    ((uint32_t *)BACKUP_SECTOR_ADDRESS)[0] = tok_id;
+    ((uint32_t *)BACKUP_SECTOR_ADDRESS)[1] = obj_id;
+
+    ck_assert_ptr_null(find_object_buffer(type, tok_id, obj_id));
+    ck_assert_uint_eq(NODES_TABLE->token_id, PKCS11_INVALID_ID);
+    ck_assert_uint_eq(NODES_TABLE->object_id, PKCS11_INVALID_ID);
+}
+END_TEST
+
+/* F-13607: update_store_size() must reject a header pointer whose
+ * 'size' field (offset 16) lands past the end of the header sector.
+ * The old guard only bounded the first byte of the 32-byte struct. */
+START_TEST(test_update_store_size_oob_header_rejected)
+{
+    struct obj_hdr *forged;
+    uint8_t *s0;
+    int slot = -1;
+    int i;
+    int ret;
+
+    ret = mmap_file(vault_path, vault_base,
+            keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xFF, keyvault_size);
+
+    ((uint32_t *)vault_base)[0] = VAULT_HEADER_MAGIC;
+    memset(vault_base + sizeof(uint32_t), 0x00, BITMAP_SIZE);
+
+    s0 = cache_get_sector(0);
+    for (i = 0; i < WOLFBOOT_PKCS11_STORE_CACHE_SECTORS; i++) {
+        if (store_cache[i].sector == s0) {
+            slot = i;
+            break;
+        }
+    }
+    ck_assert_int_ge(slot, 0);
+    ck_assert_int_lt(slot + 1, WOLFBOOT_PKCS11_STORE_CACHE_SECTORS);
+    memset(cache_sector_mem[slot + 1], 0, WOLFBOOT_SECTOR_SIZE);
+
+    /* off = SECTOR_SIZE - 16: the 'size' field lands at SECTOR_SIZE,
+     * the first word of the adjacent cache slot. */
+    forged = (struct obj_hdr *)(vault_base + WOLFBOOT_SECTOR_SIZE - 16);
+    update_store_size(forged, 0x12345678);
+    ck_assert_uint_eq(((uint32_t *)cache_sector_mem[slot + 1])[0], 0);
+}
+END_TEST
+
+/* F-13607: store_live_size() must reject a header pointer past the
+ * end of the header sector instead of reading the adjacent slot. */
+START_TEST(test_store_live_size_oob_header_rejected)
+{
+    struct store_handle handle;
+    uint8_t *s0;
+    int slot = -1;
+    int i;
+    int ret;
+
+    ret = mmap_file(vault_path, vault_base,
+            keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xFF, keyvault_size);
+
+    ((uint32_t *)vault_base)[0] = VAULT_HEADER_MAGIC;
+    memset(vault_base + sizeof(uint32_t), 0x00, BITMAP_SIZE);
+
+    s0 = cache_get_sector(0);
+    for (i = 0; i < WOLFBOOT_PKCS11_STORE_CACHE_SECTORS; i++) {
+        if (store_cache[i].sector == s0) {
+            slot = i;
+            break;
+        }
+    }
+    ck_assert_int_ge(slot, 0);
+    ck_assert_int_lt(slot + 1, WOLFBOOT_PKCS11_STORE_CACHE_SECTORS);
+    ((uint32_t *)cache_sector_mem[slot + 1])[0] = 0xDEADBEEF;
+
+    memset(&handle, 0, sizeof(handle));
+    handle.hdr = (struct obj_hdr *)(vault_base +
+        WOLFBOOT_SECTOR_SIZE - 16);
+    ck_assert_uint_eq(store_live_size(&handle), 0);
+}
+END_TEST
+
+START_TEST(test_find_object_search_stops_at_header_sector)
+{
+    const int32_t type = DYNAMIC_TYPE_RSA;
+    const uint32_t tok_id = 0x11223344U;
+    const uint32_t obj_id = 0x55667788U;
+    struct obj_hdr *backup_hdr;
+    uint32_t *payload_ids;
+    int ret;
+
+    ret = mmap_file(vault_path, vault_base,
+            keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xFF, keyvault_size);
+
+    backup_hdr = (struct obj_hdr *)(vault_base + WOLFBOOT_SECTOR_SIZE);
+    backup_hdr->token_id = tok_id;
+    backup_hdr->object_id = obj_id;
+    backup_hdr->type = type;
+    backup_hdr->pos = 0;
+    backup_hdr->size = 2 * sizeof(uint32_t);
+
+    payload_ids = (uint32_t *)(vault_base + 2 * WOLFBOOT_SECTOR_SIZE);
+    payload_ids[0] = tok_id;
+    payload_ids[1] = obj_id;
+
+    ck_assert_ptr_null(find_object_header(type, tok_id, obj_id));
+    ck_assert_ptr_null(find_object_buffer(type, tok_id, obj_id));
+}
+END_TEST
+
+/* Prove F-4649: shorter overwrite must not leave prior key bytes in flash.
+ * Write 512 bytes of 0xAA, then reopen and write 50 bytes of 0xBB.
+ * Raw flash at offsets [8+50 .. 8+512) must be 0xFF (erased), not 0xAA. */
+START_TEST(test_shorter_overwrite_erases_residual_key_material)
+{
+    const int type = DYNAMIC_TYPE_RSA;
+    const CK_ULONG id_tok = 42;
+    const CK_ULONG id_obj = 84;
+    void *store = NULL;
+    struct store_handle *h;
+    unsigned char large_key[512];
+    unsigned char small_key[50];
+    uint8_t *obj_flash;
+    uint32_t i;
+    int ret;
+
+    memset(large_key, 0xAA, sizeof(large_key));
+    memset(small_key, 0xBB, sizeof(small_key));
+
+    ret = mmap_file(vault_path, vault_base, keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xEE, keyvault_size);
+
+    /* Write large key to a fresh slot */
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, 0, &store);
+    ck_assert_int_eq(ret, 0);
+    ret = wolfPKCS11_Store_Write(store, large_key, sizeof(large_key));
+    ck_assert_int_eq(ret, (int)sizeof(large_key));
+    wolfPKCS11_Store_Close(store);
+
+    /* Reopen in write mode and store a shorter key */
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, 0, &store);
+    ck_assert_int_eq(ret, 0);
+    h = store;
+    obj_flash = h->buffer;
+    ret = wolfPKCS11_Store_Write(store, small_key, sizeof(small_key));
+    ck_assert_int_eq(ret, (int)sizeof(small_key));
+    wolfPKCS11_Store_Close(store);
+
+    /* Flash beyond the new payload must be erased (0xFF), not old 0xAA */
+    for (i = 2 * sizeof(uint32_t) + sizeof(small_key);
+         i < 2 * sizeof(uint32_t) + sizeof(large_key); i++) {
+        ck_assert_msg(obj_flash[i] == 0xFF,
+            "Residual key material at object offset %u: 0x%02x (expected 0xFF)",
+            i, obj_flash[i]);
+    }
+}
+END_TEST
+
+/* A negative length must be rejected before it enters the unsigned
+ * offset arithmetic: pre-fix, a sufficiently negative len wrapped to a
+ * large unsigned value in 'in_buffer_offset + len', entered the
+ * truncation branch, and was silently replaced by the remaining object
+ * bytes (Read) or the remaining capacity (Write, bypassing the later
+ * len < 0 guard). */
+START_TEST(test_store_rejects_negative_len)
+{
+    CK_ULONG id_tok = 1;
+    CK_ULONG id_obj = 42;
+    int type = DYNAMIC_TYPE_ECC;
+    int ret;
+    void *store = NULL;
+    unsigned char rd[16];
+    unsigned char wr[16];
+
+    ret = mmap_file(vault_path, vault_base, keyvault_size, NULL);
+    ck_assert(ret == 0);
+    memset(vault_base, 0xEE, keyvault_size);
+
+    /* Create the object with 3 bytes of content */
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, 0, &store);
+    ck_assert_msg(ret == 0, "Failed to open the vault: %d", ret);
+    ret = wolfPKCS11_Store_Write(store, (unsigned char *)"abc", 3);
+    ck_assert_int_eq(ret, 3);
+    wolfPKCS11_Store_Close(store);
+
+    /* Read: pre-fix the negative len was replaced by the 3 remaining
+     * bytes and copied out; post-fix it is rejected. */
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, 1, &store);
+    ck_assert_msg(ret == 0, "Failed to reopen the vault: %d", ret);
+    ret = wolfPKCS11_Store_Read(store, rd, -32768);
+    ck_assert_int_eq(ret, -1);
+    wolfPKCS11_Store_Close(store);
+
+    /* Write: pre-fix the negative len was clamped to the remaining
+     * capacity (4088) and read that many bytes from the 16-byte buffer
+     * below; post-fix it is rejected. */
+    ret = wolfPKCS11_Store_Open(type, id_tok, id_obj, 0, &store);
+    ck_assert_msg(ret == 0, "Failed to reopen the vault for write: %d", ret);
+    ret = wolfPKCS11_Store_Write(store, wr, -32768);
+    ck_assert_int_eq(ret, -1);
+    wolfPKCS11_Store_Close(store);
+}
+END_TEST
+
+/* Removing an object must erase the payload from flash, not just
+ * invalidate the metadata: key material must not remain recoverable
+ * after the API reports a successful deletion. */
+START_TEST(test_remove_erases_payload_from_flash)
+{
+    const int type = DYNAMIC_TYPE_RSA;
+    const CK_ULONG id_tok_a = 10;
+    const CK_ULONG id_obj_a = 20;
+    const CK_ULONG id_tok_b = 30;
+    const CK_ULONG id_obj_b = 40;
+    void *store = NULL;
+    unsigned char key_a[256];
+    unsigned char key_b[128];
+    uint8_t *buf_a;
+    uint8_t *buf_b;
+    uint32_t i;
+    int ret;
+
+    memset(key_a, 0xAB, sizeof(key_a));
+    memset(key_b, 0xCD, sizeof(key_b));
+
+    ret = mmap_file(vault_path, vault_base, keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xEE, keyvault_size);
+
+    /* Two live objects: A gets slot 0, B gets the adjacent slot 1 */
+    ret = wolfPKCS11_Store_Open(type, id_tok_a, id_obj_a, 0, &store);
+    ck_assert_int_eq(ret, 0);
+    ret = wolfPKCS11_Store_Write(store, key_a, sizeof(key_a));
+    ck_assert_int_eq(ret, (int)sizeof(key_a));
+    wolfPKCS11_Store_Close(store);
+
+    ret = wolfPKCS11_Store_Open(type, id_tok_b, id_obj_b, 0, &store);
+    ck_assert_int_eq(ret, 0);
+    ret = wolfPKCS11_Store_Write(store, key_b, sizeof(key_b));
+    ck_assert_int_eq(ret, (int)sizeof(key_b));
+    wolfPKCS11_Store_Close(store);
+
+    buf_a = find_object_buffer(type, id_tok_a, id_obj_a);
+    buf_b = find_object_buffer(type, id_tok_b, id_obj_b);
+    ck_assert_ptr_nonnull(buf_a);
+    ck_assert_ptr_nonnull(buf_b);
+    ck_assert_ptr_eq(buf_a, vault_base + 2 * WOLFBOOT_SECTOR_SIZE);
+    ck_assert_ptr_eq(buf_b, vault_base + 2 * WOLFBOOT_SECTOR_SIZE +
+        KEYVAULT_OBJ_SIZE);
+
+    /* Remove A: the payload must be erased from the raw flash */
+    ret = wolfPKCS11_Store_Remove(type, id_tok_a, id_obj_a);
+    ck_assert_int_eq(ret, 0);
+
+    /* The 8-byte id prefix is preserved by the erase (it keeps the slot
+     * identity used by the backup-recovery check); the payload region
+     * itself must be erased to 0xFF across the whole slot. */
+    ck_assert_uint_eq(((uint32_t *)buf_a)[0], (uint32_t)id_tok_a);
+    ck_assert_uint_eq(((uint32_t *)buf_a)[1], (uint32_t)id_obj_a);
+    for (i = 2 * sizeof(uint32_t); i < KEYVAULT_OBJ_SIZE; i++) {
+        ck_assert_msg(buf_a[i] == 0xFF,
+            "Payload survives removal at slot offset %u: 0x%02x",
+            i, buf_a[i]);
+    }
+
+    /* The sector read-modify-write must leave the neighboring object B
+     * intact in flash */
+    for (i = 2 * sizeof(uint32_t);
+         i < 2 * sizeof(uint32_t) + sizeof(key_b); i++) {
+        ck_assert_msg(buf_b[i] == 0xCD,
+            "Neighbor object clobbered at slot offset %u: 0x%02x",
+            i, buf_b[i]);
+    }
+    ret = wolfPKCS11_Store_Open(type, id_tok_b, id_obj_b, 1, &store);
+    ck_assert_int_eq(ret, 0);
+    ret = wolfPKCS11_Store_Read(store, key_b, sizeof(key_b));
+    ck_assert_int_eq(ret, (int)sizeof(key_b));
+    wolfPKCS11_Store_Close(store);
+
+    /* A is no longer addressable */
+    ret = wolfPKCS11_Store_Open(type, id_tok_a, id_obj_a, 1, &store);
+    ck_assert_int_eq(ret, NOT_AVAILABLE_E);
+    ret = wolfPKCS11_Store_Remove(type, id_tok_a, id_obj_a);
+    ck_assert_int_eq(ret, NOT_AVAILABLE_E);
+}
+END_TEST
+
+/* A second write window opened while the first is still open must not
+ * discard the first window's pending writes: both objects survive. */
+START_TEST(test_interleaved_write_windows_both_persist)
+{
+    const int type = DYNAMIC_TYPE_RSA;
+    const CK_ULONG id_tok = 60;
+    void *store_a = NULL;
+    void *store_b = NULL;
+    void *store = NULL;
+    char first[] = "first window payload";
+    char second[] = "second window payload";
+    char rd[64];
+    int ret;
+
+    ret = mmap_file(vault_path, vault_base, keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xEE, keyvault_size);
+
+    /* Window A: open + write, left open (dirty sector cache). */
+    ret = wolfPKCS11_Store_Open(type, id_tok, 1, 0, &store_a);
+    ck_assert_int_eq(ret, 0);
+    ret = wolfPKCS11_Store_Write(store_a, first, (int)strlen(first) + 1);
+    ck_assert_int_eq(ret, (int)strlen(first) + 1);
+
+    /* Window B while A is still open: the open re-validates the vault
+     * and must commit A's batch, not drop it. */
+    ret = wolfPKCS11_Store_Open(type, id_tok, 2, 0, &store_b);
+    ck_assert_int_eq(ret, 0);
+    ret = wolfPKCS11_Store_Write(store_b, second, (int)strlen(second) + 1);
+    ck_assert_int_eq(ret, (int)strlen(second) + 1);
+    wolfPKCS11_Store_Close(store_b);
+    wolfPKCS11_Store_Close(store_a);
+
+    ret = wolfPKCS11_Store_Open(type, id_tok, 1, 1, &store);
+    ck_assert_int_eq(ret, 0);
+    ret = wolfPKCS11_Store_Read(store, rd, (int)sizeof(rd));
+    ck_assert_int_eq(ret, (int)strlen(first) + 1);
+    ck_assert(strcmp(first, rd) == 0);
+    wolfPKCS11_Store_Close(store);
+
+    ret = wolfPKCS11_Store_Open(type, id_tok, 2, 1, &store);
+    ck_assert_int_eq(ret, 0);
+    ret = wolfPKCS11_Store_Read(store, rd, (int)sizeof(rd));
+    ck_assert_int_eq(ret, (int)strlen(second) + 1);
+    ck_assert(strcmp(second, rd) == 0);
+    wolfPKCS11_Store_Close(store);
+}
+END_TEST
+
+/* A reader opened on the same object while a write window holds it must
+ * see that window's writes, not a NOT_AVAILABLE error or erased flash.
+ * The first write is committed by the reader's own vault validation; the
+ * second is issued after the reader is open, so it sits only in the sector
+ * cache and must be read back through the cache (and the live header
+ * size), not from the pre-write flash. */
+START_TEST(test_concurrent_reader_sees_pending_writes)
+{
+    const int type = DYNAMIC_TYPE_RSA;
+    const CK_ULONG id_tok = 70;
+    void *store_w = NULL;
+    void *store_r = NULL;
+    char secret[] = "pending write";
+    char more[] = " more";
+    char rd[64];
+    int ret;
+
+    ret = mmap_file(vault_path, vault_base, keyvault_size, NULL);
+    ck_assert_int_eq(ret, 0);
+    memset(vault_base, 0xEE, keyvault_size);
+
+    ret = wolfPKCS11_Store_Open(type, id_tok, 1, 0, &store_w);
+    ck_assert_int_eq(ret, 0);
+    ret = wolfPKCS11_Store_Write(store_w, secret, (int)strlen(secret) + 1);
+    ck_assert_int_eq(ret, (int)strlen(secret) + 1);
+
+    /* The write is still pending in the write window. A concurrent
+     * reader on the same object must observe it, not erased flash. */
+    ret = wolfPKCS11_Store_Open(type, id_tok, 1, 1, &store_r);
+    ck_assert_int_eq(ret, 0);
+    memset(rd, 0, sizeof(rd));
+    ret = wolfPKCS11_Store_Read(store_r, rd, (int)sizeof(rd));
+    ck_assert_int_eq(ret, (int)strlen(secret) + 1);
+    ck_assert(strcmp(secret, rd) == 0);
+
+    /* Write more on the still-open writer: this lands only in the sector
+     * cache (the reader's open already flushed the earlier batch to
+     * flash). The reader must see it through the cache and the live
+     * header size; a flash-only or snapshot-size read returns EOF here. */
+    ret = wolfPKCS11_Store_Write(store_w, more, (int)strlen(more));
+    ck_assert_int_eq(ret, (int)strlen(more));
+    memset(rd, 0, sizeof(rd));
+    ret = wolfPKCS11_Store_Read(store_r, rd, (int)sizeof(rd));
+    ck_assert_int_eq(ret, (int)strlen(more));
+    ck_assert(memcmp(more, rd, strlen(more)) == 0);
+    wolfPKCS11_Store_Close(store_r);
+    wolfPKCS11_Store_Close(store_w);
+}
+END_TEST
+
+/* A power cycle loses every byte of RAM state the store keeps: the sector
+ * cache and the open-handle table. Flash content survives. */
+static void vault_power_cycle(void)
+{
+    memset(store_cache, 0, sizeof(store_cache));
+    memset(cache_sector_mem, 0, sizeof(cache_sector_mem));
+    memset(openstores_handles, 0, sizeof(openstores_handles));
+    cache_lru_tick = 0;
+    locked = 1;
+    /* A reboot also drops any CPU-side cache of flash. */
+    hal_cache_invalidate();
+}
+
+static int vault_obj_write(int type, CK_ULONG tok, CK_ULONG obj,
+        const uint8_t *payload, int len)
+{
+    void *store = NULL;
+    int ret = wolfPKCS11_Store_Open(type, tok, obj, 0, &store);
+
+    if (ret != 0)
+        return ret;
+    ret = wolfPKCS11_Store_Write(store, (unsigned char *)payload, len);
+    wolfPKCS11_Store_Close(store);
+    return ret;
+}
+
+/* "The object is not in the vault" is a legitimate state after a power cut,
+ * but any other open/read failure means the vault or its metadata is
+ * damaged. Report the two distinctly so the power-fail test can insist on
+ * the former and fail on the latter. */
+#define VAULT_OBJ_ABSENT (-1000)
+
+/* Committed (on-flash) header size for an object, or -1 when the vault holds
+ * no node for it at all. Read after a power cycle, so the sector cache is
+ * empty and this is what actually survived in flash. */
+static int vault_obj_committed_size(int type, CK_ULONG tok, CK_ULONG obj)
+{
+    struct obj_hdr *hdr = find_object_header(type, (uint32_t)tok,
+            (uint32_t)obj);
+
+    if (hdr == NULL)
+        return -1;
+    return (int)hdr->size;
+}
+
+static int vault_obj_read(int type, CK_ULONG tok, CK_ULONG obj,
+        uint8_t *out, int max)
+{
+    void *store = NULL;
+    int ret = wolfPKCS11_Store_Open(type, tok, obj, 1, &store);
+
+    if (ret == NOT_AVAILABLE_E)
+        return VAULT_OBJ_ABSENT;
+    if (ret != 0)
+        return ret;
+    ret = wolfPKCS11_Store_Read(store, out, max);
+    wolfPKCS11_Store_Close(store);
+    return ret;
+}
+
+/* Rewriting an existing object destroys its committed payload. Whatever the
+ * moment power is lost inside the Open/Write/Close window, the next boot must
+ * read the object back as the complete old payload, the complete new payload,
+ * or empty - never a mix of old, new and erased bytes.
+ *
+ * That is what the Open-time commit of the truncated header (size = 8) buys:
+ * without it the previous generation's size stays committed over a payload
+ * that is being erased and rewritten underneath it. This test drives a power
+ * failure at every single flash operation of the window to pin the property.
+ */
+START_TEST (test_power_fail_during_rewrite_never_mixes_generations) {
+    static uint8_t old_p[2000], new_p[300], rd[KEYVAULT_OBJ_SIZE];
+    static uint8_t snapshot[KEYVAULT_OBJ_SIZE * KEYVAULT_MAX_ITEMS +
+                            2 * WOLFBOOT_SECTOR_SIZE];
+    const int type = DYNAMIC_TYPE_ECC;
+    const CK_ULONG tok = 7, obj = 77;
+    static const char *modestr[] = { "atomic", "torn 1/4", "torn 1/2",
+                                     "torn 3/4" };
+    static const int torn_num[] = { 0, 1, 1, 3 };
+    static const int torn_den[] = { 1, 4, 2, 4 };
+    int i, ret, ops, crash, hdr_size, mode;
+
+    for (i = 0; i < (int)sizeof(old_p); i++)
+        old_p[i] = (uint8_t)('A' + (i % 23));
+    for (i = 0; i < (int)sizeof(new_p); i++)
+        new_p[i] = (uint8_t)('a' + (i % 19));
+
+    ret = mmap_file(vault_path, vault_base, keyvault_size, NULL);
+    ck_assert(ret == 0);
+    memset(vault_base, 0xEE, keyvault_size);
+
+    /* Lay down the previous generation, no faults. */
+    vault_power_cycle();
+    vault_powerfail_at = -1;
+    ret = vault_obj_write(type, tok, obj, old_p, (int)sizeof(old_p));
+    ck_assert_int_eq(ret, (int)sizeof(old_p));
+    memcpy(snapshot, vault_base, keyvault_size);
+
+    /* Count the flash operations a clean rewrite takes, and confirm the
+     * uninjected rewrite actually lands: every fault iteration below is
+     * measured against this baseline, so if the fault-free path could not
+     * store new_p the whole test would be vacuous. */
+    vault_power_cycle();
+    vault_flash_ops = 0;
+    vault_powerfail_at = -1;
+    ret = vault_obj_write(type, tok, obj, new_p, (int)sizeof(new_p));
+    ck_assert_int_eq(ret, (int)sizeof(new_p));
+    ops = vault_flash_ops;
+    ck_assert_int_gt(ops, 0);
+    vault_power_cycle();
+    memset(rd, 0, sizeof(rd));
+    ret = vault_obj_read(type, tok, obj, rd, (int)sizeof(rd));
+    ck_assert_int_eq(ret, (int)sizeof(new_p));
+    ck_assert_mem_eq(rd, new_p, sizeof(new_p));
+
+    /* Sweep every crash point once per fault shape: first with the faulting
+     * flash operation abandoned whole, then with it torn part-way through,
+     * so half-erased and half-programmed sectors are covered as well. Real
+     * silicon does not promise that a sector write is all-or-nothing. */
+    for (mode = 0; mode < (int)(sizeof(torn_num) / sizeof(torn_num[0]));
+            mode++) {
+        vault_powerfail_torn = (mode != 0);
+        vault_torn_num = torn_num[mode];
+        vault_torn_den = torn_den[mode];
+        for (crash = 0; crash <= ops; crash++) {
+            vault_restore_snapshot(snapshot);
+            vault_power_cycle();
+            vault_flash_ops = 0;
+            vault_powerfail_at = crash;
+            if (setjmp(vault_powerfail_jmp) == 0) {
+                vault_obj_write(type, tok, obj, new_p, (int)sizeof(new_p));
+            }
+            /* Power returns. */
+            vault_powerfail_at = -1;
+            vault_power_cycle();
+            memset(rd, 0, sizeof(rd));
+            ret = vault_obj_read(type, tok, obj, rd, (int)sizeof(rd));
+
+            if (crash == ops) {
+                /* No fault can land on this iteration: vault_flash_op() only
+                 * jumps once the op counter exceeds vault_powerfail_at, and a
+                 * clean rewrite performs exactly ops operations. It is the
+                 * no-fault control, so the rewrite ran to completion and the
+                 * new payload must be there. Letting it take the empty/absent
+                 * branch below would let a silently lost write pass. */
+                ck_assert_msg(ret == (int)sizeof(new_p),
+                    "%s no-fault control (op %d): object read back %d, "
+                    "expected the new payload (%d bytes)", modestr[mode],
+                    crash, ret, (int)sizeof(new_p));
+                ck_assert_msg(memcmp(rd, new_p, sizeof(new_p)) == 0,
+                    "%s no-fault control (op %d): payload is not the new "
+                    "payload", modestr[mode], crash);
+            }
+            else if (ret == (int)sizeof(old_p)) {
+                ck_assert_msg(memcmp(rd, old_p, sizeof(old_p)) == 0,
+                    "%s power fail at op %d: old-sized payload is not the old "
+                    "payload", modestr[mode], crash);
+            }
+            else if (ret == (int)sizeof(new_p)) {
+                ck_assert_msg(memcmp(rd, new_p, sizeof(new_p)) == 0,
+                    "%s power fail at op %d: new-sized payload is not the new "
+                    "payload", modestr[mode], crash);
+            }
+            else {
+                /* The one crash-safe alternative to a whole generation is the
+                 * truncated-but-present object the Open-time commit
+                 * guarantees. The node must still be there -- the rewrite
+                 * never calls create_object() for an existing object, so
+                 * losing it outright (VAULT_OBJ_ABSENT) would be a real
+                 * fault, not an empty
+                 * rewrite -- and its committed size must be exactly the 8-byte
+                 * tok/obj prefix, or the header itself came back torn. */
+                ck_assert_msg(ret == 0,
+                    "%s power fail at op %d: object read back %d, neither old "
+                    "payload, new payload, nor empty", modestr[mode], crash,
+                    ret);
+                hdr_size = vault_obj_committed_size(type, tok, obj);
+                ck_assert_msg(hdr_size == (int)(2 * sizeof(uint32_t)),
+                    "%s power fail at op %d: empty read but committed header "
+                    "size is %d, expected %d", modestr[mode], crash, hdr_size,
+                    (int)(2 * sizeof(uint32_t)));
+            }
+        }
+    }
+    vault_powerfail_torn = 0;
+}
+END_TEST
+
+
+Suite *wolfboot_suite(void)
+{
+    /* Suite initialization */
+    Suite *s = suite_create("wolfBoot-pkcs11-store");
+
+    TCase* tcase_store_and_load_objs = tcase_create("store_and_load_objs");
+    TCase* tcase_cross_sector_write = tcase_create("cross_sector_write");
+    TCase* tcase_close = tcase_create("close_state");
+    TCase* tcase_delete_object = tcase_create("delete_object");
+    TCase* tcase_delete_corrupted = tcase_create("delete_corrupted_pos");
+    TCase* tcase_find_bounds = tcase_create("find_bounds");
+    TCase* tcase_remanence = tcase_create("shorter_overwrite_erases_residual");
+    TCase* tcase_neg_len = tcase_create("rejects_negative_len");
+    TCase* tcase_remove_erase = tcase_create("remove_erases_payload");
+    TCase* tcase_interleaved = tcase_create("interleaved_windows");
+    TCase* tcase_concurrent_read = tcase_create("concurrent_reader");
+    TCase* tcase_power_fail = tcase_create("power_fail_rewrite");
+    tcase_add_test(tcase_store_and_load_objs, test_store_and_load_objs);
+    tcase_add_test(tcase_cross_sector_write, test_cross_sector_write_preserves_length);
+    tcase_add_test(tcase_close, test_close_clears_handle_state);
+    tcase_add_test(tcase_delete_object, test_delete_object_ignores_metadata_prefix);
+    tcase_add_test(tcase_delete_corrupted, test_delete_object_corrupted_pos_no_oob);
+    tcase_add_test(tcase_delete_corrupted,
+        test_find_object_buffer_corrupted_pos_no_oob);
+    tcase_add_test(tcase_find_bounds, test_find_object_search_stops_at_header_sector);
+    tcase_add_test(tcase_find_bounds, test_update_store_size_oob_header_rejected);
+    tcase_add_test(tcase_find_bounds, test_store_live_size_oob_header_rejected);
+    tcase_add_test(tcase_remanence, test_shorter_overwrite_erases_residual_key_material);
+    tcase_add_test(tcase_neg_len, test_store_rejects_negative_len);
+    tcase_add_test(tcase_remove_erase, test_remove_erases_payload_from_flash);
+    tcase_add_test(tcase_interleaved, test_interleaved_write_windows_both_persist);
+    tcase_add_test(tcase_concurrent_read, test_concurrent_reader_sees_pending_writes);
+    tcase_add_test(tcase_power_fail,
+        test_power_fail_during_rewrite_never_mixes_generations);
+    suite_add_tcase(s, tcase_store_and_load_objs);
+    suite_add_tcase(s, tcase_cross_sector_write);
+    suite_add_tcase(s, tcase_close);
+    suite_add_tcase(s, tcase_delete_object);
+    suite_add_tcase(s, tcase_delete_corrupted);
+    suite_add_tcase(s, tcase_find_bounds);
+    suite_add_tcase(s, tcase_remanence);
+    suite_add_tcase(s, tcase_neg_len);
+    suite_add_tcase(s, tcase_remove_erase);
+    suite_add_tcase(s, tcase_interleaved);
+    suite_add_tcase(s, tcase_concurrent_read);
+    suite_add_tcase(s, tcase_power_fail);
+    return s;
+}
+
+int main(void)
+{
+    int fails;
+    Suite *s;
+    SRunner *sr;
+
+    /* Use a per-process backing file so parallel test runs (or a stale file
+     * from a previous run) cannot collide on a shared /tmp path. */
+    snprintf(vault_path, sizeof(vault_path),
+            "/tmp/wolfboot-unit-keyvault-%d.bin", (int)getpid());
+
+    s = wolfboot_suite();
+    sr = srunner_create(s);
+    srunner_run_all(sr, CK_NORMAL);
+    fails = srunner_ntests_failed(sr);
+    srunner_free(sr);
+    unlink(vault_path);
+    return fails;
+}

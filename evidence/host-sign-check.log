@@ -1,0 +1,37 @@
+Keystore size: 2608
+Keytype: ED25519
+Generating key (type: ED25519)
+Associated key file:   learning.der
+Partition ids mask:   ffffffff
+Key type   :           ED25519
+Public key slot:       0
+Done.
+ 
+wolfBoot KeyTools (Compiled C version)
+wolfBoot version 20A0000
+Update type:          Firmware
+Input image:          fixture.bin
+Selected cipher:      ED25519
+Selected hash  :      SHA256
+Private key:           learning.der
+Output  image:        fixture_v7_signed.bin
+Target partition id : 1 
+Manifest header size: 256
+Found ED25519 key
+Hashing primary pubkey, size: 32
+Calculating SHA256 digest...
+Signing the digest...
+Sign: 01
+Output image(s) successfully created.
+ 
+version=7 payload=520 MSP=0x20004000 reset=0x08020109 sha256(file)=6c4dbbb12c0169f5d5541ab23d57cb9913a2b8a7881d73ba1bd9e83d43bd4eb2
+Layout/TLV check only; target wolfBoot performs cryptographic verification.
+learning key bytes= 64
+PASS native keygen/sign -> independent SHA256 + Ed25519 verification
+PASS altered payload fails signature verification
+PASS wrong key fails signature verification
+PASS layout rejects too short
+PASS layout rejects oversize
+PASS layout rejects bad reset
+PASS layout rejects bad SP
+Host-only fixtures. Not executable firmware; no target test performed.

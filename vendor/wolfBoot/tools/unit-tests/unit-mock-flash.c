@@ -1,0 +1,441 @@
+/* unit-mock-flash.c
+ *
+ * Mock flash access for unit tests
+ * usage: #include "unit-mock-flash.c"
+ *
+ *
+ * Copyright (C) 2026 wolfSSL Inc.
+ *
+ * This file is part of wolfBoot.
+ *
+ * wolfBoot is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfBoot is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
+ */
+
+static int locked = 1;
+static int ext_locked = 1;
+/* When set, the next ext_flash_write() fails and the hook clears itself,
+ * so a test can target one specific write in a multi-write sequence. */
+static int ext_flash_write_fail = 0;
+static int erased_boot = 0;
+static int erased_update = 0;
+static int erased_swap = 0;
+static int erased_nvm_bank0 = 0;
+static int erased_nvm_bank1 = 0;
+static int erased_vault = 0;
+static int hal_flash_write_fail = 0;
+const char *argv0;
+
+#ifdef MOCK_KEYVAULT
+/* Power-fail injection for the keyvault (pkcs11 store) tests.
+ *
+ * When vault_powerfail_at is >= 0, the vault flash operation with that
+ * 0-based index, and every operation after it, is abandoned: the mock
+ * longjmp()s back to the arming point instead of touching the backing
+ * store. That models a power loss part-way through a sector commit, which
+ * is the only way to observe the store's crash-consistency ordering.
+ *
+ * Disabled (-1) by default, so tests that do not arm it are unaffected.
+ */
+#include <setjmp.h>
+static int vault_powerfail_at = -1;
+static int vault_flash_ops;
+static jmp_buf vault_powerfail_jmp;
+
+/* Stale-cache model (MOCK_STALE_CACHE).
+ *
+ * Models a part that caches flash reads, such as the STM32 ICACHE: flash
+ * operations land in a shadow buffer (the real flash contents) while
+ * vault_base keeps whatever the CPU last saw, and only
+ * hal_cache_invalidate() refreshes it. Code that writes a sector and reads
+ * it back without invalidating therefore observes pre-erase bytes, exactly
+ * as it would on silicon. Off by default, so the ordinary suite is
+ * unaffected.
+ */
+#ifdef MOCK_STALE_CACHE
+static uint8_t *vault_shadow;
+static int vault_shadow_valid;
+
+static void vault_cache_prime(void)
+{
+    if (!vault_shadow_valid) {
+        if (vault_shadow == NULL) {
+            vault_shadow = malloc(keyvault_size);
+            ck_assert_ptr_nonnull(vault_shadow);
+        }
+        memcpy(vault_shadow, vault_base, keyvault_size);
+        vault_shadow_valid = 1;
+    }
+}
+
+/* Flash side of a vault write/erase: the CPU view is left untouched. */
+static uint8_t *vault_flash_at(uintptr_t address)
+{
+    vault_cache_prime();
+    return vault_shadow + (address - (uintptr_t)vault_base);
+}
+#endif
+
+/* Restore a snapshot into every representation of the vault flash.
+ *
+ * Under MOCK_STALE_CACHE the shadow *is* the flash array and vault_base is
+ * only the CPU's cached view of it, so putting the snapshot back into
+ * vault_base alone leaves the previous contents in the shadow -- and the
+ * next hal_cache_invalidate() (a power cycle does one) copies them straight
+ * back over the snapshot. A test that restores a known state before each
+ * injected fault must therefore reset both. */
+static void vault_restore_snapshot(const uint8_t *snapshot)
+{
+    memcpy(vault_base, snapshot, keyvault_size);
+#ifdef MOCK_STALE_CACHE
+    vault_cache_prime();
+    memcpy(vault_shadow, snapshot, keyvault_size);
+#endif
+}
+
+/* Torn-operation mode.
+ *
+ * By default an injected fault abandons the whole flash operation, so the
+ * sector is either untouched or fully written -- which real silicon does
+ * not promise. With vault_powerfail_torn set, the faulting operation
+ * instead applies vault_torn_num/vault_torn_den of its bytes and only then
+ * loses power, leaving a half-erased or half-programmed sector behind.
+ */
+static int vault_powerfail_torn;
+static int vault_torn_num = 1;
+static int vault_torn_den = 2;
+
+/* How many of an operation's len bytes actually reach flash.
+ *
+ * Returns len when no fault is due on this operation. When one is: in the
+ * default atomic mode this longjmp()s and never returns, leaving flash
+ * untouched; in torn mode it returns a short count, and the caller applies
+ * that prefix and then calls vault_flash_torn_abort().
+ */
+static int vault_flash_op_len(int len)
+{
+    vault_flash_ops++;
+    if ((vault_powerfail_at >= 0) && (vault_flash_ops > vault_powerfail_at)) {
+        if (!vault_powerfail_torn) {
+            longjmp(vault_powerfail_jmp, 1);
+        }
+        return (int)(((long)len * vault_torn_num) / vault_torn_den);
+    }
+    return len;
+}
+
+static void vault_flash_torn_abort(void)
+{
+    longjmp(vault_powerfail_jmp, 1);
+}
+#endif
+
+#include <sys/stat.h>
+
+
+/* Mocks */
+void hal_init(void)
+{
+}
+int hal_flash_write(haladdr_t address, const uint8_t *data, int len)
+{
+    int i;
+    uint8_t *a = (uint8_t *)(uintptr_t)address;
+    ck_assert_msg(!locked, "Attempting to write to a locked FLASH");
+    if (hal_flash_write_fail) {
+        hal_flash_write_fail = 0;
+        return -1;
+    }
+    if ((address >= WOLFBOOT_PARTITION_SWAP_ADDRESS) &&
+            (address < WOLFBOOT_PARTITION_SWAP_ADDRESS + WOLFBOOT_SECTOR_SIZE)) {
+        for (i = 0; i < len; i++) {
+            a[i] = data[i];
+        }
+    }
+    if ((address >= WOLFBOOT_PARTITION_UPDATE_ADDRESS) &&
+            (address < WOLFBOOT_PARTITION_UPDATE_ADDRESS + WOLFBOOT_PARTITION_SIZE)) {
+        for (i = 0; i < len; i++) {
+            a[i] = data[i];
+        }
+    }
+    if ((address >= WOLFBOOT_PARTITION_BOOT_ADDRESS) &&
+            (address < WOLFBOOT_PARTITION_BOOT_ADDRESS + WOLFBOOT_PARTITION_SIZE)) {
+        for (i = 0; i < len; i++) {
+            a[i] = data[i];
+        }
+    }
+#ifdef MOCK_KEYVAULT
+    if ((address >= (const uintptr_t)vault_base) && (address < (const uintptr_t)vault_base + keyvault_size)) {
+        int n = vault_flash_op_len(len);
+#ifdef MOCK_STALE_CACHE
+        a = vault_flash_at(address);
+#endif
+        for (i = 0; i < n; i++) {
+            a[i] = data[i];
+        }
+        if (n != len) {
+            vault_flash_torn_abort();
+        }
+    }
+#endif
+#ifdef WOLFBOOT_DIAGNOSTICS_ADDRESS
+    if ((address >= (haladdr_t)WOLFBOOT_DIAGNOSTICS_ADDRESS) &&
+            (address < (haladdr_t)WOLFBOOT_DIAGNOSTICS_ADDRESS +
+                WOLFBOOT_DIAGNOSTICS_SECTORS * WOLFBOOT_SECTOR_SIZE)) {
+        for (i = 0; i < len; i++) {
+            a[i] = data[i];
+        }
+    }
+#endif
+    return 0;
+}
+int hal_flash_erase(haladdr_t address, int len)
+{
+    ck_assert_msg(!locked, "Attempting to erase a locked FLASH");
+    if ((address >= WOLFBOOT_PARTITION_BOOT_ADDRESS) &&
+            (address < WOLFBOOT_PARTITION_BOOT_ADDRESS + WOLFBOOT_PARTITION_SIZE)) {
+        erased_boot++;
+        memset((void*)(uintptr_t)address, 0xFF, len);
+        if (address >= WOLFBOOT_PARTITION_BOOT_ADDRESS + WOLFBOOT_PARTITION_SIZE - WOLFBOOT_SECTOR_SIZE) {
+            erased_nvm_bank0++;
+        } else if (address >= WOLFBOOT_PARTITION_BOOT_ADDRESS + WOLFBOOT_PARTITION_SIZE - 2 * WOLFBOOT_SECTOR_SIZE) {
+            erased_nvm_bank1++;
+        }
+    } else if ((address >= WOLFBOOT_PARTITION_UPDATE_ADDRESS) &&
+            (address < WOLFBOOT_PARTITION_UPDATE_ADDRESS + WOLFBOOT_PARTITION_SIZE)) {
+        erased_update++;
+        memset((void *)(uintptr_t)address, 0xFF, len);
+        if (address >= WOLFBOOT_PARTITION_UPDATE_ADDRESS + WOLFBOOT_PARTITION_SIZE - WOLFBOOT_SECTOR_SIZE) {
+            erased_nvm_bank0++;
+        } else if (address >= WOLFBOOT_PARTITION_UPDATE_ADDRESS + WOLFBOOT_PARTITION_SIZE - 2 * WOLFBOOT_SECTOR_SIZE) {
+            erased_nvm_bank1++;
+        }
+    } else if ((address >= WOLFBOOT_PARTITION_SWAP_ADDRESS) &&
+            (address < WOLFBOOT_PARTITION_SWAP_ADDRESS + WOLFBOOT_SECTOR_SIZE)) {
+        erased_swap++;
+        memset((void *)(uintptr_t)address, 0xFF, len);
+#ifdef MOCK_KEYVAULT
+    } else if ((address >= (uintptr_t)vault_base) && (address < (uintptr_t)vault_base + keyvault_size)) {
+        int n = vault_flash_op_len(len);
+        printf("Erasing vault from %p : %p bytes\n", address, len);
+        erased_vault++;
+#ifdef MOCK_STALE_CACHE
+        memset(vault_flash_at(address), 0xFF, n);
+#else
+        memset((void *)(uintptr_t)address, 0xFF, n);
+#endif
+        if (n != len) {
+            vault_flash_torn_abort();
+        }
+#endif
+#ifdef WOLFBOOT_DIAGNOSTICS_ADDRESS
+    } else if ((address >= (haladdr_t)WOLFBOOT_DIAGNOSTICS_ADDRESS) &&
+            (address < (haladdr_t)WOLFBOOT_DIAGNOSTICS_ADDRESS +
+                WOLFBOOT_DIAGNOSTICS_SECTORS * WOLFBOOT_SECTOR_SIZE)) {
+        memset((void *)(uintptr_t)address, 0xFF, len);
+#endif
+    } else {
+        fail("Invalid address\n");
+        return -1;
+    }
+    return 0;
+}
+void hal_flash_unlock(void)
+{
+    ck_assert_msg(locked, "Double unlock detected\n");
+    locked--;
+}
+void hal_flash_lock(void)
+{
+    ck_assert_msg(!locked, "Double lock detected\n");
+    locked++;
+}
+
+#ifdef MOCK_KEYVAULT
+/* src/libwolfboot.c carries the weak default, but the keyvault suites do not
+ * include it (suites that do already have the symbol, hence the guard).
+ * Under MOCK_STALE_CACHE this is what makes flash visible to the CPU again. */
+void hal_cache_invalidate(void)
+{
+#ifdef MOCK_STALE_CACHE
+    if (vault_shadow_valid) {
+        memcpy(vault_base, vault_shadow, keyvault_size);
+    }
+#endif
+}
+#endif /* MOCK_KEYVAULT */
+
+void hal_prepare_boot(void)
+{
+}
+
+int ext_flash_erase(uintptr_t address, int len)
+{
+#ifdef PART_BOOT_EXT
+    if ((address >= WOLFBOOT_PARTITION_BOOT_ADDRESS) &&
+            (address < WOLFBOOT_PARTITION_BOOT_ADDRESS + WOLFBOOT_PARTITION_SIZE)) {
+        erased_update++;
+        memset((void *)(uintptr_t)address, 0xFF, len);
+        if (address >= WOLFBOOT_PARTITION_BOOT_ADDRESS + WOLFBOOT_PARTITION_SIZE - WOLFBOOT_SECTOR_SIZE) {
+            erased_nvm_bank0++;
+        } else if (address >= WOLFBOOT_PARTITION_BOOT_ADDRESS + WOLFBOOT_PARTITION_SIZE - 2 * WOLFBOOT_SECTOR_SIZE) {
+            erased_nvm_bank1++;
+        }
+    } else
+#endif
+    if ((address >= WOLFBOOT_PARTITION_UPDATE_ADDRESS) &&
+            (address < WOLFBOOT_PARTITION_UPDATE_ADDRESS + WOLFBOOT_PARTITION_SIZE)) {
+        erased_update++;
+        memset((void *)(uintptr_t)address, 0xFF, len);
+        if (address >= WOLFBOOT_PARTITION_UPDATE_ADDRESS + WOLFBOOT_PARTITION_SIZE - WOLFBOOT_SECTOR_SIZE) {
+            erased_nvm_bank0++;
+        } else if (address >= WOLFBOOT_PARTITION_UPDATE_ADDRESS + WOLFBOOT_PARTITION_SIZE - 2 * WOLFBOOT_SECTOR_SIZE) {
+            erased_nvm_bank1++;
+        }
+    } else if ((address >= WOLFBOOT_PARTITION_SWAP_ADDRESS) &&
+            (address < WOLFBOOT_PARTITION_SWAP_ADDRESS + WOLFBOOT_SECTOR_SIZE)) {
+        erased_swap++;
+        memset((void *)(uintptr_t)address, 0xFF, len);
+    } else {
+        fail("Invalid address: %p\n", address);
+        return -1;
+    }
+    return 0;
+}
+
+int ext_flash_write(uintptr_t address, const uint8_t *data, int len)
+{
+    int i;
+    uint8_t *a = (uint8_t *)address;
+    ck_assert_msg(!ext_locked, "Attempting to write to a locked FLASH");
+    ck_assert_msg(len >= 0, "ext_flash_write invalid len %d", len);
+    if (ext_flash_write_fail) {
+        ext_flash_write_fail = 0;
+        return -1;
+    }
+    ck_assert_msg(
+        ((address >= WOLFBOOT_PARTITION_BOOT_ADDRESS) &&
+         (address < WOLFBOOT_PARTITION_BOOT_ADDRESS + WOLFBOOT_PARTITION_SIZE) &&
+         ((uintptr_t)len <=
+          WOLFBOOT_PARTITION_BOOT_ADDRESS + WOLFBOOT_PARTITION_SIZE - address)) ||
+        ((address >= WOLFBOOT_PARTITION_UPDATE_ADDRESS) &&
+         (address < WOLFBOOT_PARTITION_UPDATE_ADDRESS + WOLFBOOT_PARTITION_SIZE) &&
+         ((uintptr_t)len <=
+          WOLFBOOT_PARTITION_UPDATE_ADDRESS + WOLFBOOT_PARTITION_SIZE - address)) ||
+        ((address >= WOLFBOOT_PARTITION_SWAP_ADDRESS) &&
+         (address < WOLFBOOT_PARTITION_SWAP_ADDRESS + WOLFBOOT_SECTOR_SIZE) &&
+         ((uintptr_t)len <=
+          WOLFBOOT_PARTITION_SWAP_ADDRESS + WOLFBOOT_SECTOR_SIZE - address)),
+        "ext_flash_write address out of range: %p len %d",
+        (void*)address, len);
+    for (i = 0; i < len; i++) {
+        a[i] = data[i];
+    }
+    return 0;
+}
+
+/* When mock_ext_flash_short_len > 0, ext_flash_read() calls of
+ * exactly that length return len - mock_ext_flash_short_bytes (a
+ * short positive read, F-12065). Other lengths read in full. */
+int mock_ext_flash_short_len = 0;
+int mock_ext_flash_short_bytes = 0;
+
+/* Records the source address of the largest ext_flash_read() call (the
+ * image load to RAM), so a test can verify which partition was booted. */
+uintptr_t mock_max_read_addr = 0;
+int mock_max_read_len = 0;
+
+int ext_flash_read(uintptr_t address, uint8_t *data, int len)
+{
+    int i;
+    int ret = len;
+    uint8_t *a = (uint8_t *)address;
+
+    if (mock_ext_flash_short_len == len && mock_ext_flash_short_bytes > 0)
+        ret = len - mock_ext_flash_short_bytes;
+    if (ret > mock_max_read_len) {
+        mock_max_read_len = ret;
+        mock_max_read_addr = address;
+    }
+    for (i = 0; i < ret; i++) {
+         data[i] = a[i];
+    }
+    return ret;
+}
+
+void ext_flash_unlock(void)
+{
+    ck_assert_msg(ext_locked, "Double ext unlock detected\n");
+    ext_locked--;
+}
+void ext_flash_lock(void)
+{
+    ck_assert_msg(!ext_locked, "Double ext lock detected\n");
+    ext_locked++;
+}
+
+void ext_flash_reset_lock(void)
+{
+    ext_locked = 1;
+}
+
+
+/* A simple mock memory */
+static int mmap_file(const char *path, uint8_t *address, uint32_t len,
+        uint8_t** ret_address)
+{
+    struct stat st = { 0 };
+    uint8_t *mmaped_addr;
+    int ret;
+    int fd;
+    int i;
+
+    if (path == NULL)
+        return -1;
+
+    fd = open(path, O_RDWR|O_CREAT|O_TRUNC, 0666);
+    if (fd == -1) {
+        fprintf(stderr, "can't open %s\n", path);
+        return -1;
+    }
+    fprintf(stderr, "Open file: %s success.\n", path);
+    for (i = 0; i < len; i+=4) {
+        const uint32_t erased_word = 0xBADBADBA;
+        write(fd, &erased_word, 4);
+    }
+    lseek(fd, SEEK_SET, 0);
+
+    mmaped_addr = mmap(address, len, PROT_READ | PROT_WRITE,
+                       MAP_SHARED, fd, 0);
+    if (mmaped_addr == MAP_FAILED) {
+        fprintf(stderr, "MMAP failed.\n");
+        return -1;
+    }
+
+    fprintf(stderr, "Simulator assigned %s to base %p\n", path, mmaped_addr);
+
+    if (ret_address)
+        *ret_address = mmaped_addr;
+
+#if defined(MOCK_KEYVAULT) && defined(MOCK_STALE_CACHE)
+    /* New backing store: the shadow is re-primed from it on first use. */
+    vault_shadow_valid = 0;
+#endif
+
+    close(fd);
+    return 0;
+}
+
+
+/* End Mocks */

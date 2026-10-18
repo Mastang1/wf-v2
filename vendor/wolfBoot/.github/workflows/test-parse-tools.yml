@@ -1,0 +1,62 @@
+name: Test parsing tools (elf and fdt)
+
+on:
+  push:
+    branches: [ 'master', 'main', 'release/**' ]
+  pull_request:
+    branches: [ '*' ]
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/wolfssl/wolfboot-ci-powerpc:v1.0
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: make distclean
+        run: |
+          make distclean
+
+      - name: Select config
+        run: |
+          cp config/examples/nxp-t1024.config .config
+
+      - name: Build wolfBoot
+        run: |
+          make
+
+      - name: Build tools
+        run: |
+          make elf-parser
+          make fdt-parser
+
+      - name: Run elf-parser test
+        run: |
+          ./tools/elf-parser/elf-parser
+
+      - name: Run fdt-parser test (nxp_t1024.dtb)
+        run: |
+          ./tools/fdt-parser/fdt-parser ./tools/fdt-parser/nxp_t1024.dtb -t
+
+      - name: Run fdt-parser malformed-input corpus under ASan/UBSan
+        run: |
+          # -fno-sanitize-recover=all is required: by default UBSan only
+          # prints "runtime error" and carries on, so a violation would
+          # leave the exit status 0 and this job would pass regardless.
+          gcc -o /tmp/fdt-parser-asan -Wall -Werror -g -O1 \
+            -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -fno-omit-frame-pointer \
+            -I include -DWOLFBOOT_FDT -DWOLFBOOT_FDT_CORPUS -DPRINTF_ENABLED \
+            tools/fdt-parser/fdt-parser.c src/fdt.c
+          ASAN_OPTIONS=detect_leaks=0 \
+          UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+            /tmp/fdt-parser-asan ./tools/fdt-parser/nxp_t1024.dtb -f

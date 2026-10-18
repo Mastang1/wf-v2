@@ -1,0 +1,163 @@
+name: Wolfboot Build workflow for AARCH64
+
+on:
+
+  workflow_call:
+    inputs:
+      arch:
+        required: true
+        type: string
+      config-file:
+        required: true
+        type: string
+      make-args:
+        required: false
+        type: string
+      psu-init-stub:
+        # Generate a build-only stub for the board psu_init_gpl.c (ZynqMP FSBL).
+        required: false
+        type: boolean
+        default: false
+      fips:
+        # Download the FIPS-ready wolfSSL tree into ../ before building, for a
+        # build-only FIPS=1 verification (see WOLFBOOT_LIB_WOLFSSL in make-args).
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Workaround for sources.list
+        run: |
+            # Replace sources
+
+            set -euxo pipefail
+
+            # Peek (what repos are active now)
+            apt-cache policy
+            grep -RInE '^(deb|Types|URIs)' /etc/apt || true
+
+            # Enable nullglob so *.list/*.sources that don't exist don't break sed
+            shopt -s nullglob
+
+            echo "Replace sources.list (legacy)"
+            sudo sed -i \
+              -e "s|https\?://azure\.archive\.ubuntu\.com/ubuntu/?|http://mirror.arizona.edu/ubuntu/|g" \
+              /etc/apt/sources.list || true
+
+            echo "Replace sources.list.d/*.list (legacy)"
+            for f in /etc/apt/sources.list.d/*.list; do
+              sudo sed -i \
+                -e "s|https\?://azure\.archive\.ubuntu\.com/ubuntu/?|http://mirror.arizona.edu/ubuntu/|g" \
+                "$f"
+            done
+
+            echo "Replace sources.list.d/*.sources (deb822)"
+            for f in /etc/apt/sources.list.d/*.sources; do
+              sudo sed -i \
+                -e "s|https\?://azure\.archive\.ubuntu\.com/ubuntu/?|http://mirror.arizona.edu/ubuntu/|g" \
+                -e "s|https\?://azure\.archive\.ubuntu\.com|http://mirror.arizona.edu|g" \
+                "$f"
+            done
+
+            echo "Fix /etc/apt/apt-mirrors.txt (used by URIs: mirror+file:...)"
+            if grep -qE '^[[:space:]]*https?://azure\.archive\.ubuntu\.com/ubuntu/?' /etc/apt/apt-mirrors.txt; then
+              # Replace azure with our mirror (idempotent)
+              sudo sed -i 's|https\?://azure\.archive\.ubuntu\.com/ubuntu/|http://mirror.arizona.edu/ubuntu/|g' /etc/apt/apt-mirrors.txt
+            fi
+
+            # Peek (verify changes)
+            grep -RIn "azure.archive.ubuntu.com" /etc/apt || true
+            grep -RInE '^(deb|Types|URIs)' /etc/apt || true
+            echo "--- apt-mirrors.txt ---"
+            cat /etc/apt/apt-mirrors.txt || true
+
+      - name: Update repository
+        run: sudo apt-get update -o Acquire::Retries=3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y build-essential curl
+
+      - name: Install cross compiler
+        run: |
+          curl -O https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/14.3.rel1/binrel/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-elf.tar.xz
+          tar xf arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-elf.tar.xz -C /opt/
+          echo "/opt/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-elf/bin" >> $GITHUB_PATH
+
+      - name: make clean
+        run: |
+          make distclean
+
+      - name: Select config
+        run: |
+          cp ${{inputs.config-file}} .config
+          if [ -n "$EXTRA_CFLAGS" ]; then
+            printf 'CFLAGS_EXTRA+=%s\n' "$EXTRA_CFLAGS" >> .config
+          fi
+
+      - name: Build tools
+        run: |
+          make -C tools/keytools && make -C tools/bin-assemble
+
+      - name: Generate ZynqMP psu_init build-only stub
+        if: ${{ inputs.psu-init-stub }}
+        run: |
+          cat > hal/board/zynqmp/psu_init_gpl.c <<'STUB'
+          /* CI build-only stub for the board psu_init_gpl.c (XSA-generated, not
+           * tracked in-tree). Satisfies the hal/zynqmp_psu_shim.c externs so the
+           * FSBL links; performs NO real PS init -- never run on hardware. */
+          unsigned long psu_mio_init_data(void) { return 1UL; }
+          unsigned long psu_peripherals_pre_init_data(void) { return 1UL; }
+          unsigned long psu_pll_init_data(void) { return 1UL; }
+          unsigned long psu_clock_init_data(void) { return 1UL; }
+          unsigned long psu_ddr_init_data(void) { return 1UL; }
+          unsigned long psu_ddr_phybringup_data(void) { return 1UL; }
+          unsigned long psu_peripherals_init_data(void) { return 1UL; }
+          unsigned long psu_resetin_init_data(void) { return 1UL; }
+          unsigned long psu_serdes_init_data(void) { return 1UL; }
+          unsigned long psu_resetout_init_data(void) { return 1UL; }
+          int serdes_fixcal_code(void) { return 0; }
+          unsigned long psu_peripherals_powerdwn_data(void) { return 1UL; }
+          unsigned long psu_afi_config(void) { return 1UL; }
+          unsigned long psu_ddr_qos_init_data(void) { return 1UL; }
+          STUB
+
+      - name: Download FIPS-ready wolfSSL
+        if: ${{ inputs.fips }}
+        env:
+          WOLFSSL_FIPS_READY_VER: "5.9.2-gplv3-fips-ready"
+          # Pin the archive SHA-256 in the repo Actions variable
+          # WOLFSSL_FIPS_READY_SHA256 (Settings > Secrets and variables >
+          # Actions > Variables). When set, a mismatch fails the job; when unset,
+          # the job prints the computed hash to pin and warns instead of silently
+          # trusting a mutable download that becomes the FIPS boundary.
+          WOLFSSL_FIPS_READY_SHA256: ${{ vars.WOLFSSL_FIPS_READY_SHA256 }}
+        run: |
+          set -euxo pipefail
+          sudo apt-get install -y unzip
+          zip=/tmp/wolfssl-fips-ready.zip
+          curl -fsSL --retry 3 --retry-delay 5 -o "$zip" \
+            "https://www.wolfssl.com/wolfssl-${WOLFSSL_FIPS_READY_VER}.zip"
+          got="$(sha256sum "$zip" | awk '{print $1}')"
+          echo "wolfssl-${WOLFSSL_FIPS_READY_VER}.zip sha256=$got"
+          if [ -n "${WOLFSSL_FIPS_READY_SHA256:-}" ]; then
+            echo "${WOLFSSL_FIPS_READY_SHA256}  $zip" | sha256sum -c -
+          else
+            echo "::warning::WOLFSSL_FIPS_READY_SHA256 not set; archive not pinned. Set the repo Actions variable to $got to enforce."
+          fi
+          unzip -q "$zip" -d ..
+          test -f "../wolfssl-${WOLFSSL_FIPS_READY_VER}/wolfcrypt/src/fips.c"
+
+      - name: Build wolfboot
+        run: |
+          make ${{inputs.make-args}}

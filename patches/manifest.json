@@ -1,0 +1,22 @@
+{
+  "hal/stm32f4.c": {
+    "before": "9fa6c951809e8b2c523a64800031e4f884c25106e487a78861321a4c74988492",
+    "after": "0e0ae1104dd5d20bf5e29cdb94828fd1254c5b96ded0c1d128694edcb2e835c3"
+  },
+  "test-app/system.c": {
+    "before": "bb0d68faa4e17bfe129c339c86498125a5ac0057afbbca6795da2ad6806ab488",
+    "after": "1bfe51421e29a7d04288183b3b5103814f0006100008cd92c509abaf84ac4779"
+  },
+  "test-app/app_stm32f4.c": {
+    "before": "cbef9cd24f70605e077004d484e8549c10c4a5f93347dd5d4c0f9e87ddbefc78",
+    "after": "72dca159935209f96d53d9d42568a9479678029d666d643b9320a9592d8141b5"
+  },
+  "test-app/led.c": {
+    "before": "0b642094badda28e7acb3b3ff07e2003c5be22109c04689fc9d0cce14a24440f",
+    "after": "85c79e997f817ad281d1cedc25fe77bd001cde094969d51a36f768fd4e1e6b7e"
+  },
+  "test-app/timer.c": {
+    "before": "88e9fcc46be0a0daa326c098b5f707d5dfa4cbe5abcd734f1db3fbaf24701cd7",
+    "after": "838cd8fbf95f36783bc7d557be540de060918f1eb5ff0f52988b43b123b7c49f"
+  }
+}

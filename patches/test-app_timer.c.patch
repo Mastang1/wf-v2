@@ -1,0 +1,11 @@
+--- a/test-app/timer.c
++++ b/test-app/timer.c
+@@ -139,7 +139,7 @@
+ 
+     TIM2_CR1    = 0;
+     asm volatile ("dmb");
+-    TIM2_PSC    = psc;
++    TIM2_PSC    = psc - 1U; /* register divides by PSC+1 */
+     TIM2_ARR    = val;
+     TIM2_CR1    |= TIM_CR1_CLOCK_ENABLE;
+     TIM2_DIER   |= TIM_DIER_UIE;

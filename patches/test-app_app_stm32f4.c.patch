@@ -1,0 +1,78 @@
+--- a/test-app/app_stm32f4.c
++++ b/test-app/app_stm32f4.c
+@@ -59,8 +59,8 @@
+ 
+ /* UART1 Config */
+ #ifdef USE_UART1
+-#define UART_RX_PIN 7
+-#define UART_TX_PIN 6
++#define UART_RX_PIN 10
++#define UART_TX_PIN 9
+ 
+ #define UART1 (0x40011000)
+ #define UART_SR       (*(volatile uint32_t *)(UART1))
+@@ -73,10 +73,10 @@
+ #define UART_CLOCK_ER_VAL 	(1 << 4)
+ 
+ #define GPIO_CLOCK_ER (*(volatile uint32_t *)(0x40023830))
+-#define GPIO_CLOCK_ER_VAL (1 << 1)
+-#define GPIOB_BASE 0x40020400
++#define GPIO_CLOCK_ER_VAL (1 << 0)
++#define GPIOB_BASE 0x40020000 /* GPIOA: preserve macro name to keep diff small */
+ #define GPIO_MODE  (*(volatile uint32_t *)(GPIOB_BASE + 0x00))
+-#define GPIO_AF    (*(volatile uint32_t *)(GPIOB_BASE + 0x20))
++#define GPIO_AF    (*(volatile uint32_t *)(GPIOB_BASE + 0x24))
+ #endif
+ 
+ /* UART3 Config */
+@@ -148,10 +148,10 @@
+     GPIO_MODE = reg | (2 << (UART_TX_PIN * 2));
+ 
+     /* Alternate function: use low pins (6 and 7) */
+-    reg = GPIO_AF & ~(0xf << ((UART_TX_PIN) * 4));
+-    GPIO_AF = reg | (UART_PIN_AF << ((UART_TX_PIN) * 4));
+-    reg = GPIO_AF & ~(0xf << ((UART_RX_PIN) * 4));
+-    GPIO_AF = reg | (UART_PIN_AF << ((UART_RX_PIN) * 4));
++    reg = GPIO_AF & ~(0xf << ((UART_TX_PIN - 8) * 4));
++    GPIO_AF = reg | (UART_PIN_AF << ((UART_TX_PIN - 8) * 4));
++    reg = GPIO_AF & ~(0xf << ((UART_RX_PIN - 8) * 4));
++    GPIO_AF = reg | (UART_PIN_AF << ((UART_RX_PIN - 8) * 4));
+ }
+ 
+ int uart_setup(uint32_t bitrate, uint8_t data, char parity, uint8_t stop)
+@@ -166,7 +166,7 @@
+     UART_CR1 |= (UART_CR1_TX_ENABLE | UART_CR1_RX_ENABLE);
+ 
+     /* Configure clock */
+-    UART_BRR =  CLOCK_SPEED / bitrate;
++    UART_BRR = (CLOCK_SPEED / 2U + bitrate / 2U) / bitrate; /* USART1 PCLK2=84MHz */
+ 
+     /* Configure data bits */
+     if (data == 8)
+@@ -247,7 +247,7 @@
+     flash_set_waitstates();
+     clock_config();
+     led_pwm_setup();
+-    pwm_init(CLOCK_SPEED, 0);
++    pwm_init(CLOCK_SPEED / 2U, 0); /* APB1 timers=84MHz */
+ 
+     /* Dim the led by altering the PWM duty-cicle
+      * in isr_tim2 (timer.c)
+@@ -256,7 +256,7 @@
+      * to the blue led increases/decreases making a pulse
+      * effect.
+      */
+-    timer_init(CLOCK_SPEED, 1, 50);
++    timer_init(CLOCK_SPEED / 2U, 1, 50);
+     uart_setup(115200, 8, 'N', 1);
+     memset(page, 0xFF, PAGESIZE);
+     asm volatile ("cpsie i");
+@@ -300,7 +300,7 @@
+         } while (r_total < MSGSIZE);
+         if (tot_len == 0)  {
+             tlen = msg[2] + (msg[3] << 8) + (msg[4] << 16) + (msg[5] << 24);
+-            if (tlen > WOLFBOOT_PARTITION_SIZE - 8) {
++            if ((tlen < IMAGE_HEADER_SIZE) || (tlen > WOLFBOOT_PARTITION_SIZE - WOLFBOOT_SECTOR_SIZE)) {
+                 uart_write(ERR);
+                 uart_write(ERR);
+                 uart_write(ERR);

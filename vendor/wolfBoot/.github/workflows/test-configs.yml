@@ -1,0 +1,1438 @@
+name: Test Example Configs
+
+on:
+  push:
+    branches: [ 'master', 'main', 'release/**' ]
+  pull_request:
+    branches: [ '*' ]
+
+jobs:
+
+  agilex5_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/agilex5_013b_sdcard.config
+
+  cypsoc6_test:
+    uses: ./.github/workflows/test-build-psoc6.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/cypsoc6.config
+
+  hifive1_test:
+    uses: ./.github/workflows/test-build-riscv.yml
+    with:
+      arch: riscv
+      config-file: ./config/examples/hifive1.config
+
+  sama5d3_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/sama5d3.config
+
+  same51_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/same51.config
+
+  same51_dbank_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/same51-dualbank.config
+
+  imx_rt1040_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt1040.config
+      board-name: evkbmimxrt1060
+
+  imx_rt1050_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt1050.config
+      board-name: evkbmimxrt1060
+
+  imx_rt1060_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt1060.config
+      board-name: evkbmimxrt1060
+
+  imx_rt1064_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt1064.config
+      board-name: evkmimxrt1064
+
+  imx_rt1040_test_pka:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt1040.config
+      board-name: evkbmimxrt1060
+      make-args: PKA=1 NO_ARM_ASM=1
+
+  imx_rt1050_test_pka:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt1050.config
+      board-name: evkbmimxrt1060
+      make-args: PKA=1 NO_ARM_ASM=1
+
+  imx_rt1060_test_pka:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt1060.config
+      board-name: evkbmimxrt1060
+      make-args: PKA=1 NO_ARM_ASM=1
+
+  imx_rt1064_test_pka:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt1064.config
+      board-name: evkmimxrt1064
+      make-args: PKA=1 NO_ARM_ASM=1
+
+  imx_rt1060_hab_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt1060_hab.config
+      board-name: evkbmimxrt1060
+
+  imx_rt700_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt700.config
+      board-name: mimxrt700evk
+
+  imx_rt700_tz_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt700-tz.config
+      board-name: mimxrt700evk
+
+  imx_rt700_mldsa_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/imx-rt700-mldsa.config
+      board-name: mimxrt700evk
+
+  kinetis_k64f_test:
+    uses: ./.github/workflows/test-build-mcux-sdk.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/kinetis-k64f.config
+
+  kinetis_k82f_test:
+    uses: ./.github/workflows/test-build-mcux-sdk.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/kinetis-k82f.config
+
+  library_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/library.config
+      make-args: test-lib
+
+  libwolfboot_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/library.config
+
+  lpc54606j512_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/lpc54606j512.config
+      board-name: lpcxpresso55s06
+
+  lpc55s69_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/lpc55s69.config
+      board-name: lpcxpresso55s69
+
+  lpc55s69_tz_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/lpc55s69-tz.config
+      board-name: lpcxpresso55s69
+
+  m2354_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/m2354.config
+
+  m2354_tz_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/m2354-tz.config
+
+  nrf52840_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf52840.config
+
+  nrf5340_app_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf5340.config
+
+  nrf5340_app_tz_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf5340-tz.config
+
+  nrf5340_app_wolfcrypt_tz_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf5340-wolfcrypt-tz.config
+
+  nrf5340_net_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf5340_net.config
+
+  nrf54l15_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf54l15.config
+
+  nrf54l15_wolfcrypt_tz_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf54l15-wolfcrypt-tz.config
+
+  nrf54lm20_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf54lm20.config
+
+  nrf54lm20_wolfcrypt_tz_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf54lm20-wolfcrypt-tz.config
+
+  nrf54lm20_no_uart_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf54lm20.config
+      make-args: DEBUG_UART=0
+
+  nrf54lm20_benchmark_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nrf54lm20.config
+      make-args: BOOT_BENCHMARK=1
+
+  nxp_p1021_test:
+    uses: ./.github/workflows/test-build-powerpc.yml
+    with:
+      arch: ppc
+      config-file: ./config/examples/nxp-p1021.config
+
+  nxp_t1024_test:
+    uses: ./.github/workflows/test-build-powerpc.yml
+    with:
+      arch: ppc
+      config-file: ./config/examples/nxp-t1024.config
+
+  nxp_t1040_test:
+    uses: ./.github/workflows/test-build-powerpc.yml
+    with:
+      arch: ppc
+      config-file: ./config/examples/nxp-t1040.config
+
+  # SD card disk boot via the eSDHC driver (hal/nxp_esdhc.o)
+  nxp_t1040_sdcard_test:
+    uses: ./.github/workflows/test-build-powerpc.yml
+    with:
+      arch: ppc
+      config-file: ./config/examples/nxp-t1040-sdcard.config
+
+  nxp_t2080_test:
+    uses: ./.github/workflows/test-build-powerpc.yml
+    with:
+      arch: ppc
+      config-file: ./config/examples/nxp-t2080.config
+
+  # Additional T2080 board-specific compile tests for alternate board macros.
+  nxp_t2080_test_naii_68ppc2:
+    uses: ./.github/workflows/test-build-powerpc.yml
+    with:
+      arch: ppc
+      config-file: ./config/examples/nxp-t2080.config
+      make-args: CFLAGS_EXTRA=-DBOARD_NAII_68PPC2
+
+  # VPX3-152 compile test: validates board-specific code paths build cleanly.
+  # Uses default config addresses (128MB layout); real hardware needs the
+  # VPX3-152 address overrides uncommented in .config.
+  nxp_t2080_vpx3152_test:
+    uses: ./.github/workflows/test-build-powerpc.yml
+    with:
+      arch: ppc
+      config-file: ./config/examples/nxp-t2080.config
+      make-args: CFLAGS_EXTRA=-DBOARD_CW_VPX3152
+
+  # ELF=0 on both: the test app is a flat image linked at
+  # WOLFBOOT_LOAD_ADDRESS, and ELF=1 would sign test-app/image.elf instead,
+  # which elf_load then refuses because it is staged at its own link address.
+  nxp_t2080_sec_qoriq_test:
+    uses: ./.github/workflows/test-build-powerpc.yml
+    with:
+      arch: ppc
+      config-file: ./config/examples/nxp-t2080.config
+      # The board macro relocates CCSRBAR; the SEC base follows it.
+      make-args: SEC_QORIQ=1 CFLAGS_EXTRA=-DBOARD_CW_VPX3152 WOLFCRYPT_TEST=1 ELF=0
+
+  nxp_t1040_sec_qoriq_test:
+    uses: ./.github/workflows/test-build-powerpc.yml
+    with:
+      arch: ppc
+      config-file: ./config/examples/nxp-t1040.config
+      # SIGN=ECC384 defines NO_RSA; RSA2048 builds the RSA offload paths.
+      make-args: SEC_QORIQ=1 WOLFCRYPT_TEST=1 WOLFCRYPT_BENCHMARK=1 SIGN=RSA2048 ELF=0
+
+  nxp_lpc54s0xx_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nxp_lpc54s0xx.config
+
+  nxp_ls1028a_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/nxp-ls1028a.config
+      make-args: CROSS_COMPILE=aarch64-linux-gnu-
+
+  nxp_ls1028a_tpm_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/nxp-ls1028a-tpm.config
+      make-args: CROSS_COMPILE=aarch64-linux-gnu-
+
+  # SD card disk boot via the Freescale eSDHC driver (hal/nxp_esdhc.o)
+  nxp_ls1028a_sdcard_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/nxp-ls1028a-sdcard.config
+      make-args: CROSS_COMPILE=aarch64-linux-gnu-
+
+  nxp_mcxa_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxa.config
+      board-name: frdmmcxa153
+
+  nxp_mcxw_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxw.config
+      board-name: frdmmcxw71
+
+  nxp_mcxw_tz_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxw-tz.config
+      board-name: frdmmcxw71
+
+  nxp_mcxw_no_uart_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxw.config
+      board-name: frdmmcxw71
+      make-args: "DEBUG_UART=0"
+
+  nxp_mcxw_wolfcrypt_tz_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxw-tz.config
+      board-name: frdmmcxw71
+      make-args: "WOLFCRYPT_TZ=1 WOLFCRYPT_TZ_PKCS11=1"
+
+  # Without the console the S200 entropy objects must still link
+  nxp_mcxw_wolfcrypt_tz_no_uart_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxw-tz.config
+      board-name: frdmmcxw71
+      make-args: "WOLFCRYPT_TZ=1 WOLFCRYPT_TZ_PKCS11=1 DEBUG_UART=0"
+
+  nxp_mcxn_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxn.config
+      board-name: frdmmcxn947
+
+  nxp_mcxn_tz_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxn-tz.config
+      board-name: frdmmcxn947
+
+  nxp_mcxn_wolfcrypt_tz_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxn-wolfcrypt-tz.config
+      board-name: frdmmcxn947
+
+  nxp_mcxn_tz_psa_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxn-tz-psa.config
+      board-name: frdmmcxn947
+
+  nxp_mcxn_tz_psa_hw_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/mcxn-tz-psa-hw.config
+      board-name: frdmmcxn947
+
+  nxp_rw612_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/rw612.config
+      board-name: frdmrw612
+
+  nxp_rw612_tz_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/rw612-tz.config
+      board-name: frdmrw612
+
+  nxp_rw612_wolfcrypt_tz_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/rw612-tz.config
+      board-name: frdmrw612
+      make-args: "WOLFCRYPT_TZ=1 WOLFCRYPT_TZ_PKCS11=1"
+
+  # Without the console the TRNG still needs the reset driver linked in
+  nxp_rw612_wolfcrypt_tz_no_uart_test:
+    uses: ./.github/workflows/test-build-mcux-sdk-manifests.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/rw612-tz.config
+      board-name: frdmrw612
+      make-args: "WOLFCRYPT_TZ=1 WOLFCRYPT_TZ_PKCS11=1 DEBUG_UART=0"
+
+  nxp_s32k142_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nxp-s32k142.config
+
+  nxp_s32k144_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nxp-s32k144.config
+
+  nxp_s32k146_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nxp-s32k146.config
+
+  nxp_s32k148_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/nxp-s32k148.config
+
+  max32666_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/max32666.config
+
+  # TPU build pulls in the Analog Devices MSDK for hardware SHA256 acceleration
+  max32666_tpu_test:
+    uses: ./.github/workflows/test-build-msdk.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/max32666.config
+      make-args: MAX3266X_TPU=1
+
+  microchip_mpfs250_test:
+    uses: ./.github/workflows/test-build-riscv.yml
+    with:
+      arch: riscv64
+      config-file: ./config/examples/polarfire_mpfs250.config
+  microchip_mpfs250_fs_test:
+    uses: ./.github/workflows/test-build-riscv.yml
+    with:
+      arch: riscv64
+      config-file: ./config/examples/polarfire_mpfs250.config
+      make-args: DISK_FS=both
+  # The bit-serial gzip decoder (GZIP_SMALL=1) on a GZIP=1 target.
+  microchip_mpfs250_gzip_small_test:
+    uses: ./.github/workflows/test-build-riscv.yml
+    with:
+      arch: riscv64
+      config-file: ./config/examples/polarfire_mpfs250.config
+      make-args: GZIP_SMALL=1
+  microchip_mpfs250_qspi_test:
+    uses: ./.github/workflows/test-build-riscv.yml
+    with:
+      arch: riscv64
+      config-file: ./config/examples/polarfire_mpfs250_qspi.config
+  # M-mode + LPDDR4 build: generate a CI-only Libero settings stub (all
+  # zeros) and point LIBERO_FPGA_CONFIG_DIR at it so MPFS_DDR_INIT actually
+  # compiles in CI.  The stub is generated from the HAL sources (not
+  # committed); real boards must override LIBERO_FPGA_CONFIG_DIR with the
+  # actual Libero/HSS-generated config.
+  microchip_mpfs250_m_test:
+    uses: ./.github/workflows/test-build-riscv.yml
+    with:
+      arch: riscv64
+      config-file: ./config/examples/polarfire_mpfs250_m.config
+      pre-build: sh tools/ci/gen_mpfs_libero_stub.sh tools/ci/mpfs_libero_stub
+      make-args: LIBERO_FPGA_CONFIG_DIR=tools/ci/mpfs_libero_stub
+  microchip_mpfs250_m_qspi_test:
+    uses: ./.github/workflows/test-build-riscv.yml
+    with:
+      arch: riscv64
+      config-file: ./config/examples/polarfire_mpfs250_m_qspi.config
+
+  raspi3_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/raspi3.config
+      make-args: wolfboot.bin CROSS_COMPILE=aarch64-linux-gnu-
+
+  raspi3_encrypted_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/raspi3-encrypted.config
+      make-args: wolfboot.bin CROSS_COMPILE=aarch64-linux-gnu-
+
+  imx95_m7_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      # i.MX95 Cortex-M7: wolfBoot runs from ITCM (loaded by remoteproc) and
+      # the payload lives in DDR, so there is no contiguous factory.bin.
+      config-file: ./config/examples/imx95-m7.config
+      make-args: wolfboot.bin test-app/image_v1_signed.bin
+
+  imx95_a55_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      # i.MX95 Cortex-A55 as BL33. The payload is a Linux FIT on the boot
+      # medium, so there is no test app and no contiguous factory.bin.
+      config-file: ./config/examples/imx95-a55.config
+      make-args: wolfboot.bin CROSS_COMPILE=aarch64-linux-gnu-
+
+  imx95_a55_stage1_emmc_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      # The stage 1 that replaces U-Boot SPL, reading the containers from the
+      # eMMC boot partition. Nothing else compiles the AHAB parser or the
+      # OCRAM link, so this keeps both from rotting.
+      config-file: ./config/examples/imx95-a55.config
+      make-args: -C stage1 DISK_EMMC=1 DISK_SDCARD=0 loader_stage1.bin CROSS_COMPILE=aarch64-linux-gnu-
+
+  imx95_a55_stage1_sd_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      # Same stage 1 against the SD controller rather than the eMMC one.
+      config-file: ./config/examples/imx95-a55.config
+      make-args: -C stage1 DISK_SDCARD=1 DISK_EMMC=0 loader_stage1.bin CROSS_COMPILE=aarch64-linux-gnu-
+
+  tegra234_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      # Tegra234 bare-metal BL33: bootloader + signed payload (RAM boot, no
+      # contiguous factory.bin), mirroring raspi3. This is the target's full
+      # MAIN_TARGET, and what the bundling scripts build.
+      config-file: ./config/examples/tegra234.config
+      make-args: wolfboot.bin test-app/image_v1_signed.bin CROSS_COMPILE=aarch64-linux-gnu-
+
+  tegra234_linux_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      # Tegra234 DRAM-staged Linux boot (MMU/EL2->EL1/DTB code path).
+      config-file: ./config/examples/tegra234-linux.config
+      make-args: wolfboot.bin test-app/image_v1_signed.bin CROSS_COMPILE=aarch64-linux-gnu-
+
+  tegra234_sdcard_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      # Tegra234 microSD/SDHCI path. Hardware bring-up is still blocked, so
+      # this job exists to keep the Tegra SDHCI shim and the BPMP clock driver
+      # compiling.
+      config-file: ./config/examples/tegra234-sdcard.config
+      make-args: wolfboot.bin test-app/image_v1_signed.bin CROSS_COMPILE=aarch64-linux-gnu-
+
+  imx8qm_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      # Bundled payload in DRAM, no storage driver. The target's full
+      # MAIN_TARGET and what the packaging script builds.
+      config-file: ./config/examples/imx8qm-mek.config
+      make-args: wolfboot.bin test-app/image_v1_signed.bin
+
+  imx8qm_linux_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      # Linux FIT off the SD card: MMU, EL2->EL1 and the DTB code path.
+      config-file: ./config/examples/imx8qm-mek.config
+      make-args: DISK_SDCARD=1 IMX8QM_MMU=1 EL2_HYPERVISOR=1 BOOT_EL1=1 wolfboot.bin test-app/image_v1_signed.bin
+
+  imx8qm_sdcard_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      # SD card (uSDHC2): keeps the uSDHC-to-SDHCI register shim compiled.
+      config-file: ./config/examples/imx8qm-mek.config
+      make-args: DISK_SDCARD=1 wolfboot.bin test-app/image_v1_signed.bin
+
+  imx8qm_emmc_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      # eMMC (uSDHC1): the only imx8qm build that compiles the DISK_EMMC
+      # branches of src/sdhci.c.
+      config-file: ./config/examples/imx8qm-mek.config
+      make-args: DISK_EMMC=1 wolfboot.bin test-app/image_v1_signed.bin
+
+  imx8qm_sdcard_fs_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      # Keeps the read-only filesystem layer (src/disk_fs.c, src/fat32.c,
+      # src/ext4.c) compiled against this target.
+      config-file: ./config/examples/imx8qm-mek.config
+      make-args: DISK_SDCARD=1 DISK_FS=both wolfboot.bin test-app/image_v1_signed.bin
+
+  imx8qm_qspi_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      # FlexSPI0 serial NOR: the only imx8qm build that compiles the
+      # ext_flash_* FlexSPI driver and the partition-based update flow. Its
+      # memory map differs enough to warrant its own config.
+      config-file: ./config/examples/imx8qm-mek-qspi.config
+      make-args: wolfboot.bin test-app/image_v1_signed.bin
+
+  imx8qm_no_scu_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      # arch.mk sets IMX8QM_SCU ?= 1, so every other imx8qm job already compiles
+      # the SCU (MU1_A) client. This is the one job that builds it OUT, which is
+      # the chainload path and is otherwise never compiled in CI.
+      config-file: ./config/examples/imx8qm-mek.config
+      make-args: DISK_SDCARD=1 IMX8QM_SCU=0 wolfboot.bin test-app/image_v1_signed.bin
+
+  disk_boot_confirm_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      # Boot confirmation and rollback on the disk path: the only job that
+      # compiles the DISK_BOOT_CONFIRM state-record code in src/update_disk.c.
+      config-file: ./config/examples/cm4_sdcard.config
+      make-args: DISK_BOOT_CONFIRM=1 wolfboot.bin
+
+  cm4_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/cm4.config
+      # Also build the cm4 test-app (app_cm4.c) so it cannot silently rot.
+      make-args: wolfboot.bin test-app/image.bin
+
+  cm4_sdcard_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/cm4_sdcard.config
+      make-args: wolfboot.bin
+
+  cm4_emmc_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/cm4_emmc.config
+      make-args: wolfboot.bin
+
+  cm4_emmc_silent_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      # Disk targets with the console off: the variables the GPT and slot
+      # traces print are unused once wolfBoot_printf compiles out.
+      config-file: ./config/examples/cm4_emmc.config
+      make-args: DEBUG_UART=0 wolfboot.bin
+
+  cm4_emmc_linux_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/cm4_emmc_linux.config
+      make-args: wolfboot.bin
+
+  cm4_emmc_rauc_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/cm4_emmc_rauc.config
+      make-args: wolfboot.bin
+
+  cm4_fips_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/cm4.config
+      make-args: wolfboot.bin FIPS=1 WOLFBOOT_LIB_WOLFSSL=../wolfssl-5.9.2-gplv3-fips-ready NO_ARM_ASM=1
+      fips: true
+
+  sim_fips_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-fips.config
+      fips: true
+
+  tegra234_sdcard_fs_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/tegra234-sdcard.config
+      make-args: DISK_FS=both wolfboot.bin test-app/image_v1_signed.bin CROSS_COMPILE=aarch64-linux-gnu-
+
+  sim_tfm_smallstack_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim.config
+      make-args: WOLFBOOT_SMALL_STACK=1
+
+  sim_tfm_bigstack_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim.config
+      make-args: WOLFBOOT_SMALL_STACK=0 WOLFBOOT_HUGE_STACK=1
+
+  sim_spmathall_smallstack_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim.config
+      make-args: SPMATHALL=1 WOLFBOOT_SMALL_STACK=1
+
+  sim_spmathall_bigstack_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim.config
+      make-args: SPMATHALL=1 WOLFBOOT_SMALL_STACK=0 WOLFBOOT_HUGE_STACK=1
+
+  sim_spmath_bigstack_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim.config
+      make-args: SPMATH=1 WOLFBOOT_SMALL_STACK=0 WOLFBOOT_HUGE_STACK=1
+
+  sim_multi_sector_erase:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim.config
+      make-args: CFLAGS_EXTRA=-DWOLFBOOT_FLASH_MULTI_SECTOR_ERASE
+
+  sim_elf_scattered:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-elf-scattered.config
+
+  sim_elf_scattered_nobackup:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-elf-scattered.config
+      make-args: DISABLE_BACKUP=1
+
+  # TODO: SP math with small stack has issues
+
+  stm32c0:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32c0.config
+
+  stm32c0-rsa248:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32c0-rsa2048.config
+
+  stm32c0-lms-8-10-1:
+    uses: ./.github/workflows/test-build-lms.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32c0-lms-8-10-1.config
+
+  stm32f1_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32f1.config
+
+  stm32f4_small_blocks_uart_update_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32f4-small-blocks-uart-update.config
+
+  stm32f407_discovery_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32f407-discovery.config
+
+  stm32f411_blackpill_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32f411-blackpill.config
+
+  stm32f7_dualbank_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32f7-dualbank.config
+
+  stm32f7_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32f7.config
+
+  stm32g0_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32g0.config
+
+  stm32g4_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32g4.config
+
+  stm32h5_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h5.config
+
+  stm32h5_dualbank_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h5-dualbank.config
+
+  stm32n6_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32n6.config
+
+  stm32n6_tz_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32n6-tz.config
+
+  stm32h5_tz_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h5-tz.config
+
+  stm32h5_tz_tpm_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h5-tz-tpm.config
+
+  stm32h5_tz_tpm_mfgid_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h5-tz-tpm-mfgid.config
+
+  stm32h5_tz_tpm_mfgid_precomputed_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h5-tz-tpm-mfgid-precomputed.config
+
+  stm32h5_tz_dualbank_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h5-tz-dualbank.config
+
+  stm32h5_tz_dualbank_otp_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h5-tz-dualbank-otp.config
+
+  stm32h5_tz_dualbank_otp_lms_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h5-tz-dualbank-otp-lms.config
+
+  stm32h7_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h7.config
+
+  stm32h7_qspi_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h7.config
+      make-args: QSPI_FLASH=1
+
+  stm32h7_octospi_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h7-octospi.config
+
+  stm32h7s_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32h7s.config
+
+  stm32l0_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32l0.config
+
+  stm32l4_cube_test:
+    uses: ./.github/workflows/test-build-stm32cube.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32l4-cube.config
+      cube-repo: STMicroelectronics/STM32CubeL4
+
+  stm32l5_nonsecure_dualbank_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32l5-nonsecure-dualbank.config
+
+  stm32l5_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32l5.config
+
+  stm32l5_wolfcrypt_tz:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32l5-wolfcrypt-tz.config
+
+  stm32u3_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32u3.config
+
+  stm32c5_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32c5.config
+
+  psoc_c3_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/psoc_c3.config
+
+  # 128 KB part: same target, smaller partitions.
+  psoc_c3_128k_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/psoc_c3.config
+      make-args: WOLFBOOT_PARTITION_SIZE=0xB000 WOLFBOOT_PARTITION_BOOT_ADDRESS=0x12008000 WOLFBOOT_PARTITION_UPDATE_ADDRESS=0x12013000 WOLFBOOT_PARTITION_SWAP_ADDRESS=0x1201E000
+
+  # A TPM over each of the two serial back-ends.
+  psoc_c3_tpm_spi_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/psoc_c3.config
+      make-args: WOLFTPM=1
+
+  psoc_c3_tpm_i2c_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/psoc_c3.config
+      make-args: WOLFTPM=1 WOLFBOOT_TPM_I2C=1
+
+  # The same transport over the bit-banged back-end instead of the controller.
+  psoc_c3_tpm_i2c_bitbang_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/psoc_c3.config
+      make-args: WOLFTPM=1 WOLFBOOT_TPM_I2C=1 I2C_BITBANG=1
+
+  # Builds the TIS-over-I2C transport itself, with no target port involved.
+  sim_tpm_i2c_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-tpm.config
+      make-args: WOLFBOOT_TPM_I2C=1
+
+  stm32c5_no_clock_restore_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32c5.config
+      make-args: WOLFBOOT_RESTORE_CLOCK=0
+
+  stm32c5_dualbank_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32c5-dualbank.config
+
+  stm32u5_nonsecure_dualbank_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32u5-nonsecure-dualbank.config
+
+  stm32u5_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32u5.config
+
+  stm32u5_wolfcrypt_tz:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32u5-wolfcrypt-tz.config
+
+  stm32wb_delta_enc_ext_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb-delta-enc-ext.config
+
+  stm32wb_delta_ext_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb-delta-ext.config
+
+  stm32wb_delta_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb-delta.config
+
+  stm32wb_pka_1mb_test:
+    uses: ./.github/workflows/test-build-stm32cube.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb-pka-1mb.config
+      cube-repo: STMicroelectronics/STM32CubeWB
+      make-args: PKA=1 NO_ARM_ASM=1
+
+  stm32wb_tpm_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb-tpm.config
+
+  stm32wb_uart_flash_encryption_aes128_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb-uart-flash-encryption-aes128.config
+
+  stm32wb_uart_flash_encryption_aes256_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb-uart-flash-encryption-aes256.config
+
+  stm32wb_uart_flash_encryption_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb-uart-flash-encryption.config
+
+  stm32wb_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb.config
+
+  stm32wb_wolfhal_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wb.config
+      make-args: WOLFHAL=1 BOARD=stm32wb_nucleo
+
+  stm32wba_wolfhal_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wba.config
+
+  # DEBUG_UART=1 variant: compiles the GPIO/UART drivers and the
+  # wolfHAL_board.h pin table.
+  stm32wba_wolfhal_debug_uart_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/stm32wba.config
+      make-args: DEBUG_UART=1
+
+  # TODO: ti-tms570lc435.config requires F021 Flash API (Windows installer only)
+  # ti_tms570lc435_test:
+  #   uses: ./.github/workflows/test-build-ti-hercules.yml
+  #   with:
+  #     arch: arm
+  #     config-file: ./config/examples/ti-tms570lc435.config
+
+  # Cannot run on CI without the SDK (see VORAGO_SDK_DIR)
+  # vorago_va416x0_test:
+  #   uses: ./.github/workflows/test-build.yml
+  #   with:
+  #     arch: arm
+  #     config-file: ./config/examples/vorago_va416x0.config
+
+  x86_64_efi_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/x86_64_efi.config
+
+  aarch64_efi_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/aarch64_efi.config
+      # Build gnu-efi for aarch64 (pinned in the script) before wolfboot.efi.
+      prep-run: ./tools/scripts/build-gnu-efi-aarch64.sh
+
+  zynqmp_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp.config
+
+  zynqmp_sdcard_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_sdcard.config
+
+  # The bit-serial gzip decoder (GZIP_SMALL=1) on a GZIP=1 target.
+  zynqmp_gzip_small_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp.config
+      make-args: GZIP_SMALL=1
+
+  # Builds that compile the read-only filesystem layer (src/disk_fs.c,
+  # src/fat32.c, src/ext4.c) and the DISK_FS branches of src/update_disk.c.
+  zynqmp_sdcard_fs_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_sdcard.config
+      make-args: DISK_FS=both
+
+  zynqmp_sdcard_fs_fat32_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_sdcard.config
+      make-args: DISK_FS=fat32
+
+  zynqmp_sdcard_fs_ext4_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_sdcard.config
+      make-args: DISK_FS=ext4
+
+  # Only build that compiles the DISK_ENCRYPT paths of src/update_disk.c.
+  zynqmp_sdcard_encrypt_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_sdcard.config
+      make-args: ENCRYPT=1 ENCRYPT_WITH_AES256=1
+
+  zynqmp_sdcard_encrypt_chacha_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_sdcard.config
+      make-args: ENCRYPT=1 ENCRYPT_WITH_CHACHA=1
+
+  # The only build that compiles the WOLFBOOT_FIT_RAMDISK paths of src/fdt.c.
+  zynqmp_sdcard_ramdisk_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_sdcard.config
+      make-args: FIT_RAMDISK=1 WOLFBOOT_LOAD_RAMDISK_ADDRESS=0x40000000
+
+  zynqmp_fsbl_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_fsbl.config
+      make-args: ZYNQMP_FSBL=1 ZYNQMP_PSU_INIT_DIR=hal/board/zynqmp
+      psu-init-stub: true
+
+  zynqmp_fsbl_sec_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_fsbl.config
+      make-args: ZYNQMP_FSBL=1 ZYNQMP_PSU_INIT_DIR=hal/board/zynqmp ZYNQMP_SEC=1 ZYNQMP_PUF_SELFTEST=1 ZYNQMP_AES_SELFTEST=1
+      psu-init-stub: true
+
+  zynqmp_fsbl_sd_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp_fsbl_sd.config
+      make-args: ZYNQMP_FSBL=1 ZYNQMP_PSU_INIT_DIR=hal/board/zynqmp DISK_SDCARD=1
+      psu-init-stub: true
+
+  zynqmp_phy_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp.config
+      make-args: CFLAGS_EXTRA=-DWOLFBOOT_ZYNQMP_PHY_INIT
+
+  zynqmp_phy_delay_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/zynqmp.config
+      # Exercise a custom step list using every op (GPIO, WR, RD, DELAY)
+      # plus BOOT_BENCHMARK's hal_get_timer_us dependency.
+      make-args: BOOT_BENCHMARK=1 CFLAGS_EXTRA="-DWOLFBOOT_ZYNQMP_PHY_INIT -DZYNQMP_PHY_INIT_STEPS={ZYNQMP_PHY_OP_GPIO,0,1},{ZYNQMP_PHY_OP_DELAY,0,10},{ZYNQMP_PHY_OP_WR,0x1E,0x0819},{ZYNQMP_PHY_OP_RD,0x1F,0}"
+
+  zynq7000_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/zynq7000.config
+
+  zynq7000_sdcard_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/zynq7000_sdcard.config
+
+  zynq7000_sdcard_fs_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/zynq7000_sdcard.config
+      make-args: DISK_FS=both
+
+  versal_vmk180_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/versal_vmk180.config
+
+  versal_vmk180_sdcard_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/versal_vmk180_sdcard.config
+
+  versal_vmk180_sdcard_fs_test:
+    uses: ./.github/workflows/test-build-aarch64.yml
+    with:
+      arch: aarch64
+      config-file: ./config/examples/versal_vmk180_sdcard.config
+      make-args: DISK_FS=both
+
+  sim_wolfhsm_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-wolfHSM-client-ecc.config
+
+  sim_wolfhsm_client_mldsa_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-wolfHSM-client-mldsa.config
+
+  sim_wolfhsm_client_certchain_ecc_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-wolfHSM-client-certchain-ecc.config
+
+  sim_wolfhsm_client_certchain_rsa4096_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-wolfHSM-client-certchain-rsa4096.config
+
+  sim_wolfhsm_server_certchain_ecc_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-wolfHSM-server-certchain-ecc.config
+
+  sim_wolfhsm_server_certchain_rsa4096_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-wolfHSM-server-certchain-rsa4096.config
+
+  sim_wolfhsm_server_certchain_rsa2048_ca_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim-wolfHSM-server-certchain-rsa2048-ca.config
+
+  # Auxiliary algorithms (AUX_PK_ALGOS/AUX_HASH_ALGOS) compile-only matrix
+  sim_aux_algos_ed25519_rsa_ecc_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim.config
+      make-args: AUX_PK_ALGOS=rsa4096,ecc384 AUX_HASH_ALGOS=sha384,sha512
+
+  sim_aux_algos_multi_rsa_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim.config
+      make-args: SIGN=RSA2048 AUX_PK_ALGOS=rsa4096,rsapss2048,ecc521,ed448 AUX_HASH_ALGOS=sha3
+
+  sim_aux_algos_tpm_fallback_test:
+    uses: ./.github/workflows/test-build.yml
+    with:
+      arch: host
+      config-file: ./config/examples/sim.config
+      make-args: WOLFTPM=1 SIM_TPM=1
+
+  rp2350_test:
+    uses: ./.github/workflows/test-build-pico-sdk.yml
+    with:
+      arch: arm
+      config-file: ./config/examples/rp2350.config
+      target: rp2350
+
+  # Renesas RX builds using the ghcr.io/wolfssl/wolfboot-ci-rx image
+  # (GNURX toolchain; built from .github/docker/renesas-rx/).
+  renesas_rx65n_test:
+    uses: ./.github/workflows/test-build-renesas-rx.yml
+    with:
+      arch: rx
+      config-file: ./config/examples/renesas-rx65n.config
+
+  renesas_rx65n_bigendian_test:
+    uses: ./.github/workflows/test-build-renesas-rx.yml
+    with:
+      arch: rx
+      config-file: ./config/examples/renesas-rx65n.config
+      make-args: BIG_ENDIAN=1 DEBUG_SYMBOLS=1
+
+  renesas_rx72n_test:
+    uses: ./.github/workflows/test-build-renesas-rx.yml
+    with:
+      arch: rx
+      config-file: ./config/examples/renesas-rx72n.config

@@ -1,0 +1,4150 @@
+/* sign.c
+ *
+ * C native signing tool
+ *
+ *
+ * Copyright (C) 2026 wolfSSL Inc.
+ *
+ * This file is part of wolfBoot.
+ *
+ * wolfBoot is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfBoot is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
+ */
+
+/* Option to enable sign tool debugging */
+/* Must also define DEBUG_WOLFSSL in user_settings.h */
+//#define DEBUG_SIGNTOOL
+
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
+#define _CRT_NONSTDC_NO_DEPRECATE /* unlink */
+#endif
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <limits.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <stddef.h>
+#include <inttypes.h>
+#include <delta.h>
+
+#include "wolfboot/version.h"
+
+#ifdef DEBUG_SIGNTOOL
+#define DEBUG_PRINT(...) fprintf(stderr, __VA_ARGS__)
+#define DEBUG_BUFFER(buf,sz) WOLFSSL_BUFFER(buf,sz)
+#else
+#define DEBUG_PRINT(...) do{}while(0)
+#define DEBUG_BUFFER(buf,sz) do{}while(0)
+#endif
+
+#ifdef _WIN32
+#include <io.h>
+#define HAVE_MMAP 0
+#define ftruncate(fd, len) _chsize(fd, len)
+static inline int fp_truncate(FILE *f, size_t len)
+{
+    int fd;
+    if (f == NULL)
+        return -1;
+    fd = _fileno(f);
+    return _chsize(fd, len);
+}
+#else
+#define HAVE_MMAP 1
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
+#define MAX_SRC_SIZE (1 << 24)
+
+#ifndef MAX_CUSTOM_TLVS
+#define MAX_CUSTOM_TLVS (16)
+#endif
+
+/* wolfBoot and this tool stop parsing at any header field larger than
+ * (uint16_t)(header size - IMAGE_HEADER_OFFSET), at most 65528 including the
+ * 4-byte tag and length, so the largest usable value is 65524. A longer
+ * field would hide every field after it, including the signature. */
+#define MAX_TLV_LEN (65524)
+
+#include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/wolfcrypt/asn.h>
+#include <wolfssl/wolfcrypt/aes.h>
+
+#ifdef HAVE_CHACHA
+#include <wolfssl/wolfcrypt/chacha.h>
+#endif
+
+
+#ifndef NO_RSA
+    #include <wolfssl/wolfcrypt/rsa.h>
+#endif
+#ifdef HAVE_ECC
+    #include <wolfssl/wolfcrypt/ecc.h>
+#endif
+#ifdef HAVE_ED25519
+    #include <wolfssl/wolfcrypt/ed25519.h>
+#endif
+#ifdef HAVE_ED448
+    #include <wolfssl/wolfcrypt/ed448.h>
+#endif
+#ifndef NO_SHA256
+    #include <wolfssl/wolfcrypt/sha256.h>
+#endif
+#ifndef NO_SHA384
+    #include <wolfssl/wolfcrypt/sha512.h>
+#endif
+#ifdef WOLFSSL_SHA3
+    #include <wolfssl/wolfcrypt/sha3.h>
+#endif
+#include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/error-crypt.h>
+
+#ifdef WOLFSSL_HAVE_LMS
+    #ifdef HAVE_LIBLMS
+        #include <wolfssl/wolfcrypt/ext_lms.h>
+    #else
+        #include <wolfssl/wolfcrypt/wc_lms.h>
+    #endif
+#endif
+
+#ifdef WOLFSSL_HAVE_XMSS
+    #ifdef HAVE_LIBXMSS
+        #include <wolfssl/wolfcrypt/ext_xmss.h>
+    #else
+        #include <wolfssl/wolfcrypt/wc_xmss.h>
+    #endif
+#endif
+
+#ifdef WOLFSSL_HAVE_MLDSA
+    #include <wolfssl/wolfcrypt/wc_mldsa.h>
+#endif
+
+#ifdef DEBUG_SIGNTOOL
+    #include <wolfssl/wolfcrypt/logging.h>
+#endif
+
+#include "wolfboot/wolfboot.h"
+
+#if defined(_WIN32) && !defined(PATH_MAX)
+    #define PATH_MAX 256
+#endif
+
+
+#define WOLFBOOT_MAGIC          0x464C4F57 /* WOLF */
+
+#define HDR_VERSION             0x01
+#define HDR_TIMESTAMP           0x02
+#define HDR_SHA256              0x03
+#define HDR_IMG_TYPE            0x04
+#define HDR_PUBKEY              0x10
+#define HDR_SECONDARY_CIPHER    0x11
+#define HDR_SECONDARY_PUBKEY    0x12
+#define HDR_SHA3_384            0x13
+#define HDR_SHA384              0x14
+#define HDR_SIGNATURE           0x20
+#define HDR_POLICY_SIGNATURE    0x21
+#define HDR_SECONDARY_SIGNATURE 0x22
+#define HDR_CERT_CHAIN          0x23
+/* HDR_DEVICE_TREE_DIGEST comes from wolfboot/wolfboot.h (included above),
+ * matching how HDR_CMDLINE is consumed. */
+
+
+#define HDR_SHA256_LEN    32
+#define HDR_SHA384_LEN    48
+
+#define HDR_SHA3_384_LEN  48
+#define HDR_VERSION_LEN   4
+#define HDR_TIMESTAMP_LEN 8
+#define HDR_IMG_TYPE_LEN  2
+
+#define HDR_IMG_DELTA_BASE 0x05
+#define HDR_IMG_DELTA_SIZE 0x06
+#define HDR_IMG_DELTA_BASE_HASH 0x07
+#define HDR_IMG_DELTA_INVERSE 0x15
+#define HDR_IMG_DELTA_INVERSE_SIZE 0x16
+
+#define HDR_IMG_TYPE_AUTH_MASK    0xFF00
+#define HDR_IMG_TYPE_AUTH_NONE    0xFF00
+#define HDR_IMG_TYPE_WOLFBOOT     0x0000
+#define HDR_IMG_TYPE_APP          0x0001
+#define HDR_IMG_TYPE_DIFF         0x00D0
+#define HDR_IMG_TYPE_HYBRID       0x0080
+
+#define HASH_SHA256    HDR_SHA256
+#define HASH_SHA384    HDR_SHA384
+#define HASH_SHA3      HDR_SHA3_384
+
+#define SIGN_AUTO      0
+#define NO_SIGN        HDR_IMG_TYPE_AUTH_NONE
+#define SIGN_ED25519   HDR_IMG_TYPE_AUTH_ED25519
+#define SIGN_ECC256    HDR_IMG_TYPE_AUTH_ECC256
+#define SIGN_RSA2048   HDR_IMG_TYPE_AUTH_RSA2048
+#define SIGN_RSA3072   HDR_IMG_TYPE_AUTH_RSA3072
+#define SIGN_RSA4096   HDR_IMG_TYPE_AUTH_RSA4096
+#define SIGN_RSAPSS2048  HDR_IMG_TYPE_AUTH_RSAPSS2048
+#define SIGN_RSAPSS3072  HDR_IMG_TYPE_AUTH_RSAPSS3072
+#define SIGN_RSAPSS4096  HDR_IMG_TYPE_AUTH_RSAPSS4096
+#define SIGN_ED448     HDR_IMG_TYPE_AUTH_ED448
+#define SIGN_ECC384    HDR_IMG_TYPE_AUTH_ECC384
+#define SIGN_ECC521    HDR_IMG_TYPE_AUTH_ECC521
+#define SIGN_LMS       HDR_IMG_TYPE_AUTH_LMS
+#define SIGN_XMSS      HDR_IMG_TYPE_AUTH_XMSS
+#define SIGN_ML_DSA    HDR_IMG_TYPE_AUTH_ML_DSA
+
+
+#define ENC_OFF 0
+#define ENC_CHACHA 1
+#define ENC_AES128 2
+#define ENC_AES256 3
+
+/* Use algorithm-specific constants from wolfboot.h */
+#define ENC_MAX_BLOCK_SZ ENCRYPT_BLOCK_SIZE_CHACHA  /* 64 - largest block size */
+#define ENC_MAX_KEY_SZ   ENCRYPT_KEY_SIZE_AES256    /* 32 */
+#define ENC_MAX_IV_SZ    ENCRYPT_NONCE_SIZE_AES     /* 16 */
+
+static void header_store_u16_le(uint8_t *dst, uint16_t val)
+{
+    dst[0] = (uint8_t)(val & 0xFFU);
+    dst[1] = (uint8_t)((val >> 8) & 0xFFU);
+}
+
+static void header_store_u32_le(uint8_t *dst, uint32_t val)
+{
+    dst[0] = (uint8_t)(val & 0xFFU);
+    dst[1] = (uint8_t)((val >> 8) & 0xFFU);
+    dst[2] = (uint8_t)((val >> 16) & 0xFFU);
+    dst[3] = (uint8_t)((val >> 24) & 0xFFU);
+}
+
+static void header_store_u64_le(uint8_t *dst, uint64_t val)
+{
+    uint32_t lo = (uint32_t)(val & 0xFFFFFFFFULL);
+    uint32_t hi = (uint32_t)(val >> 32);
+
+    header_store_u32_le(dst, lo);
+    header_store_u32_le(dst + 4, hi);
+}
+
+static void header_append_u32(uint8_t* header, uint32_t* idx, uint32_t tmp32)
+{
+    header_store_u32_le(&header[*idx], tmp32);
+    *idx += sizeof(tmp32);
+}
+static void header_append_u16(uint8_t* header, uint32_t* idx, uint16_t tmp16)
+{
+    header_store_u16_le(&header[*idx], tmp16);
+    *idx += sizeof(tmp16);
+}
+
+static uint32_t header_append_limit(void);
+
+static void header_append_tag(uint8_t* header, uint32_t* idx, uint16_t tag,
+    uint16_t len, const void* data)
+{
+    const uint32_t append_sz = (uint32_t)(sizeof(tag) + sizeof(len)) + len;
+    const uint32_t header_sz = header_append_limit();
+
+    if ((*idx > header_sz) || (append_sz > (header_sz - *idx))) {
+        fprintf(stderr,
+            "Header overflow while appending tag 0x%04x "
+            "(offset=%u, size=%u, header=%u)\n",
+            tag, *idx, append_sz, header_sz);
+        exit(1);
+    }
+
+    header_append_u16(header, idx, tag);
+    header_append_u16(header, idx, len);
+    memcpy(&header[*idx], data, len);
+    *idx += len;
+}
+
+static void header_append_tag_u16(uint8_t *header, uint32_t *idx, uint16_t tag,
+    uint16_t val)
+{
+    uint8_t tmp[sizeof(val)];
+
+    header_store_u16_le(tmp, val);
+    header_append_tag(header, idx, tag, sizeof(val), tmp);
+}
+
+static void header_append_tag_u32(uint8_t *header, uint32_t *idx, uint16_t tag,
+    uint32_t val)
+{
+    uint8_t tmp[sizeof(val)];
+
+    header_store_u32_le(tmp, val);
+    header_append_tag(header, idx, tag, sizeof(val), tmp);
+}
+
+static void header_append_tag_u64(uint8_t *header, uint32_t *idx, uint16_t tag,
+    uint64_t val)
+{
+    uint8_t tmp[sizeof(val)];
+
+    header_store_u64_le(tmp, val);
+    header_append_tag(header, idx, tag, sizeof(val), tmp);
+}
+
+#include "../lms/lms_common.h"
+#include "../xmss/xmss_common.h"
+
+/* Globals */
+static const char wolfboot_delta_file[] = "/tmp/wolfboot-delta.bin";
+
+struct signing_key {
+    ed25519_key ed;
+    ed448_key ed4;
+    ecc_key ecc;
+    RsaKey rsa;
+    LmsKey lms;
+    XmssKey xmss;
+    wc_MlDsaKey ml_dsa;
+};
+
+/* Hybrid signing keeps the primary and the secondary private key decoded at
+ * the same time, so the two signers must not share the same storage. */
+static struct signing_key key;
+static struct signing_key key2;
+
+static struct signing_key *key_obj(int secondary)
+{
+    return secondary ? &key2 : &key;
+}
+
+/* Run the algorithm specific (zeroizing) free on a decoded signing key. */
+/* Safe to call on an object that was never initialized, or twice: "key" and
+ * "key2" are zero-initialized file-scope statics and every wolfCrypt free
+ * below is NULL-checked and idempotent. load_key() has paths that never
+ * initialize the object (--manual-sign, --sha-only, raw-public-key inputs) and
+ * paths that already free it, so both cases do occur. */
+static void free_key(int sign, int secondary)
+{
+    struct signing_key *k = key_obj(secondary);
+    if (sign == SIGN_ED25519) {
+        wc_ed25519_free(&k->ed);
+    }
+    else if (sign == SIGN_ED448) {
+        wc_ed448_free(&k->ed4);
+    }
+    else if (sign == SIGN_ECC256 ||
+             sign == SIGN_ECC384 ||
+             sign == SIGN_ECC521) {
+        wc_ecc_free(&k->ecc);
+    }
+    else if (sign == SIGN_RSA2048 ||
+             sign == SIGN_RSA3072 ||
+             sign == SIGN_RSA4096 ||
+             sign == SIGN_RSAPSS2048 ||
+             sign == SIGN_RSAPSS3072 ||
+             sign == SIGN_RSAPSS4096) {
+        wc_FreeRsaKey(&k->rsa);
+    }
+    else if (sign == SIGN_LMS) {
+        wc_LmsKey_Free(&k->lms);
+    }
+    else if (sign == SIGN_XMSS) {
+        wc_XmssKey_Free(&k->xmss);
+    }
+    else if (sign == SIGN_ML_DSA) {
+        wc_MlDsaKey_Free(&k->ml_dsa);
+    }
+}
+
+struct cmd_options {
+    int manual_sign;
+    int policy_sign;
+    int self_update;
+    int sha_only;
+    int header_only;
+    int encrypt;
+    int hash_algo;
+    int sign;
+    int hybrid;
+    int secondary_sign;
+    int delta;
+    int no_ts;
+    int sign_wenc;
+    const char *image_file;
+    const char *key_file;
+    const char *secondary_key_file;
+    const char *fw_version;
+    const char *signature_file;
+    const char *policy_file;
+    const char *encrypt_key_file;
+    const char *delta_base_file;
+    const char *cert_chain_file;
+    const char *dts_file;
+    int no_base_sha;
+    char output_image_file[PATH_MAX];
+    char output_diff_file[PATH_MAX];
+    char output_encrypted_image_file[PATH_MAX];
+    uint32_t pubkey_sz;
+    uint32_t header_sz;
+    uint32_t signature_sz;
+    uint32_t secondary_signature_sz;
+    uint32_t policy_sz;
+    uint8_t partition_id;
+    uint32_t custom_tlvs;
+    struct cmd_tlv {
+        uint16_t tag;
+        uint16_t len;
+        uint64_t val;
+        uint8_t *buffer;
+    } custom_tlv[MAX_CUSTOM_TLVS];
+};
+
+static struct cmd_options CMD = {
+    .sign = SIGN_AUTO,
+    .encrypt  = ENC_OFF,
+    .hash_algo = HASH_SHA256,
+    .partition_id = HDR_IMG_TYPE_APP,
+    .hybrid = 0
+};
+
+static uint32_t header_append_limit(void)
+{
+    return CMD.header_sz;
+}
+
+static void zero_and_free(uint8_t *buf, uint32_t len)
+{
+    if (buf == NULL) {
+        return;
+    }
+
+    wc_ForceZero(buf, len);
+    free(buf);
+}
+
+static uint16_t sign_tool_find_header(uint8_t *haystack, uint16_t type, uint8_t **ptr)
+{
+    uint8_t *p = haystack;
+    uint16_t len, htype;
+    const volatile uint8_t *max_p = (haystack - IMAGE_HEADER_OFFSET) +
+                                                    CMD.header_sz;
+    *ptr = NULL;
+    if (p > max_p) {
+        fprintf(stderr, "Illegal address (too high)\n");
+        return 0;
+    }
+    while ((p + 4) < max_p) {
+        htype = p[0] | (p[1] << 8);
+        if (htype == 0) {
+            fprintf(stderr, "Explicit end of options reached\n");
+            break;
+        }
+        /* skip unaligned half-words and padding bytes */
+        if ((p[0] == HDR_PADDING) || ((((size_t)p) & 0x01) != 0)) {
+            p++;
+            continue;
+        }
+
+        len = p[2] | (p[3] << 8);
+        /* check len (compare in a 32-bit domain: a uint16_t cast of the
+         * header budget wraps for headers >= 64 KiB and rejects every
+         * field) */
+        if ((uint32_t)(4 + len) >
+            (uint32_t)(CMD.header_sz - IMAGE_HEADER_OFFSET)) {
+            fprintf(stderr, "This field too large to fit into header "
+                "(%d > %d)\n",
+                (int)(4 + len), (int)(CMD.header_sz - IMAGE_HEADER_OFFSET));
+            break;
+        }
+        /* check max pointer */
+        if (p + 4 + len > max_p) {
+            fprintf(stderr, "This field is too large and would overflow the "
+                "image header pointer\n");
+            break;
+        }
+
+        /* skip header [type|len] */
+        p += 4;
+
+        if (htype == type) {
+            /* found, return pointer to data portion */
+            *ptr = p;
+            return len;
+        }
+        p += len;
+    }
+    return 0;
+}
+
+static int load_key_ecc(int sign_type, uint32_t curve_sz, int curve_id,
+    uint32_t header_sz,
+    uint8_t **key_buffer, uint32_t *key_buffer_sz,
+    uint8_t **pubkey, uint32_t *pubkey_sz, int secondary)
+{
+    int ret = -1;
+    int initRet = -1;
+    uint32_t idx;
+    uint32_t qxSz = curve_sz;
+    uint32_t qySz = curve_sz;
+    struct signing_key *k = key_obj(secondary);
+
+    *pubkey_sz = curve_sz * 2;
+    *pubkey = malloc(*pubkey_sz); /* assume malloc works */
+    if (*pubkey == NULL) {
+        printf("Pubkey malloc error!\n");
+        return -1;
+    }
+    initRet = ret = wc_ecc_init(&k->ecc);
+    if (CMD.manual_sign || CMD.sha_only) {
+        /* raw (public x + public y) */
+        if (*key_buffer_sz == (curve_sz * 2)) {
+            memcpy(*pubkey, *key_buffer, *pubkey_sz);
+            ret = 0;
+        }
+        else {
+            if (ret == 0) {
+                idx = 0;
+                ret = wc_EccPublicKeyDecode(*key_buffer, &idx, &k->ecc,
+                    *key_buffer_sz);
+            }
+
+            /* we could decode another type of key in auto so check */
+            if (ret == 0 && k->ecc.dp->id != curve_id) {
+                ret = -1;
+            }
+            if (ret == 0) {
+                ret = wc_ecc_export_public_raw(&k->ecc,
+                    *pubkey, &qxSz,           /* public x */
+                    *pubkey + curve_sz, &qySz /* public y */
+                );
+            }
+        }
+    }
+    /* raw only (public x + public y + private d)*/
+    else if (*key_buffer_sz == (curve_sz * 3)) {
+        memcpy(*pubkey, *key_buffer, *pubkey_sz);
+
+        if (ret == 0) {
+            ret = wc_ecc_import_unsigned(&k->ecc,
+                *key_buffer,                    /* public x */
+                (*key_buffer) + curve_sz,       /* public y */
+                (*key_buffer) + (curve_sz * 2), /* private d */
+                curve_id
+            );
+            if (ret == 0) {
+                /* don't free the key */
+                initRet = 0;
+            }
+        }
+    }
+    /* try ASN.1/DER decode of private key */
+    else {
+        if (ret == 0) {
+            idx = 0;
+            ret = wc_EccPrivateKeyDecode(*key_buffer, &idx, &k->ecc,
+                *key_buffer_sz);
+        }
+        /* we could decode another type of key in auto so check */
+        if (ret == 0 && k->ecc.dp->id != curve_id) {
+            ret = -1;
+        }
+        if (ret == 0) {
+            ret = wc_ecc_export_public_raw(&k->ecc,
+                *pubkey, &qxSz,           /* public x */
+                *pubkey + curve_sz, &qySz /* public y */
+            );
+        }
+        if (ret == 0) {
+            /* don't free the key */
+            initRet = 0;
+        }
+    }
+
+    if (ret != 0 && initRet == 0) {
+        wc_ecc_free(&k->ecc);
+    }
+    if (ret != 0) {
+        free(*pubkey);
+        *pubkey = NULL;
+    }
+
+    if (ret == 0 || CMD.sign != SIGN_AUTO) {
+        if (CMD.header_sz < header_sz)
+            CMD.header_sz = header_sz;
+        if (secondary) {
+            CMD.secondary_sign = sign_type;
+            CMD.secondary_signature_sz = (curve_sz * 2);
+            printf("Secondary ECC key, size: %d\n", CMD.secondary_signature_sz);
+        } else {
+            CMD.sign = sign_type;
+            CMD.signature_sz = (curve_sz * 2);
+        }
+        ret = 0;
+    }
+    return ret;
+}
+
+static int load_key_rsa(int sign_type, uint32_t rsa_keysz, uint32_t rsa_pubkeysz,
+    uint32_t header_sz,
+    uint8_t **key_buffer, uint32_t *key_buffer_sz,
+    uint8_t **pubkey, uint32_t *pubkey_sz, int secondary)
+{
+    int ret = -1;
+    int initRet = -1;
+    uint32_t idx;
+    uint32_t keySzOut = 0;
+    struct signing_key *k = key_obj(secondary);
+
+    if (CMD.manual_sign || CMD.sha_only) {
+        /* Allocate and copy pubkey instead of using key_buffer directly */
+        *pubkey_sz = *key_buffer_sz;
+        *pubkey = malloc(*pubkey_sz);
+        if (*pubkey == NULL) {
+            printf("Pubkey malloc error!\n");
+            return -1;
+        }
+        memcpy(*pubkey, *key_buffer, *pubkey_sz);
+
+        if (*pubkey_sz <= rsa_pubkeysz) {
+            CMD.header_sz = header_sz;
+            if (secondary) {
+                CMD.secondary_signature_sz = rsa_keysz;
+                CMD.secondary_sign = sign_type;
+            } else {
+                CMD.sign = sign_type;
+                CMD.signature_sz = rsa_keysz;
+            }
+        }
+        ret = 0;
+    }
+    else {
+        initRet = ret = wc_InitRsaKey(&k->rsa, NULL);
+        if (ret == 0) {
+            idx = 0;
+            ret = wc_RsaPrivateKeyDecode(*key_buffer, &idx, &k->rsa,
+                *key_buffer_sz);
+        }
+
+        if (ret == 0) {
+            ret = wc_RsaKeyToPublicDer(&k->rsa, *key_buffer, *key_buffer_sz);
+        }
+
+        if (ret > 0) {
+            /* Allocate and copy pubkey instead of using key_buffer directly */
+            *pubkey_sz = ret;
+            *pubkey = malloc(*pubkey_sz);
+            if (*pubkey == NULL) {
+                printf("Pubkey malloc error!\n");
+                ret = -1;
+                if (initRet == 0) {
+                    wc_FreeRsaKey(&k->rsa);
+                }
+                return -1;
+            }
+            memcpy(*pubkey, *key_buffer, *pubkey_sz);
+            ret = 0;
+        }
+
+        if (ret == 0) {
+            keySzOut = wc_RsaEncryptSize(&k->rsa);
+        }
+
+        if (ret != 0 && initRet == 0) {
+            wc_FreeRsaKey(&k->rsa);
+        }
+
+        if (ret == 0 || CMD.sign != SIGN_AUTO) {
+            if (CMD.header_sz < header_sz)
+                CMD.header_sz = header_sz;
+            if (secondary) {
+                CMD.secondary_sign = sign_type;
+                CMD.secondary_signature_sz = keySzOut;
+            } else {
+                CMD.sign = sign_type;
+                CMD.signature_sz = keySzOut;
+            }
+            printf("Found RSA%d key\n", keySzOut*8);
+        }
+    }
+    return ret;
+}
+
+static uint8_t *load_key(uint8_t **key_buffer, uint32_t *key_buffer_sz,
+    uint8_t **pubkey, uint32_t *pubkey_sz, int secondary)
+{
+    int ret = -1;
+    int initRet = -1;
+    uint32_t idx = 0;
+    int io_sz;
+    FILE *f;
+    word32 priv_sz = 0;
+    word32 pub_sz = 0;
+    int sign = CMD.sign;
+    const char *key_file = CMD.key_file;
+    struct signing_key *k = key_obj(secondary);
+
+    /* open and load key buffer */
+    *key_buffer = NULL;
+    *pubkey = NULL;
+    *pubkey_sz = 0;
+    if (secondary) {
+        key_file = CMD.secondary_key_file;
+        sign = CMD.secondary_sign;
+    }
+
+    f = fopen(key_file, "rb");
+    if (f == NULL) {
+        printf("Open key file %s failed\n", key_file);
+        goto failure;
+    }
+    /* Unbuffered: keep no libc-owned copy of the private key bytes. */
+    setvbuf(f, NULL, _IONBF, 0);
+    fseek(f, 0, SEEK_END);
+    *key_buffer_sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    *key_buffer = malloc(*key_buffer_sz);
+    if (*key_buffer) {
+        io_sz = (int)fread(*key_buffer, 1, *key_buffer_sz, f);
+        if (io_sz != (int)*key_buffer_sz) {
+            printf("Key file read error!\n");
+            fclose(f);
+            f = NULL;
+            goto failure;
+        }
+    }
+    fclose(f);
+    f = NULL;
+    if (*key_buffer == NULL) {
+        printf("Key buffer malloc error!\n");
+        goto failure;
+    }
+    DEBUG_PRINT("Key buffer size: %d\n", *key_buffer_sz);
+
+    switch (sign) {
+        /* auto, just try them all, no harm no foul */
+        default:
+            FALL_THROUGH;
+        case SIGN_ED25519:
+            ret = -1;
+            initRet = -1;
+            *pubkey_sz = ED25519_PUB_KEY_SIZE;
+            *pubkey = malloc(*pubkey_sz);
+            if (*pubkey == NULL) {
+                printf("Pubkey malloc error!\n");
+                goto failure;
+            }
+
+            if (CMD.manual_sign || CMD.sha_only) {
+                /* raw */
+                if (*key_buffer_sz == KEYSTORE_PUBKEY_SIZE_ED25519) {
+                    memcpy(*pubkey, *key_buffer, KEYSTORE_PUBKEY_SIZE_ED25519);
+
+                    ret = 0;
+                }
+                else {
+                    initRet = ret = wc_ed25519_init(&k->ed);
+                    if (ret == 0) {
+                        idx = 0;
+                        ret = wc_Ed25519PublicKeyDecode(*key_buffer, &idx,
+                            &k->ed, *key_buffer_sz);
+                    }
+                    if (ret == 0) {
+                        ret = wc_ed25519_export_public(&k->ed, *pubkey,
+                            pubkey_sz);
+                    }
+
+                    /* free key no matter what */
+                    if (initRet == 0)
+                        wc_ed25519_free(&k->ed);
+                }
+            }
+            /* raw only */
+            else if (*key_buffer_sz == ED25519_PRV_KEY_SIZE) {
+                memcpy(*pubkey, *key_buffer + ED25519_KEY_SIZE,
+                    KEYSTORE_PUBKEY_SIZE_ED25519);
+
+                initRet = ret = wc_ed25519_init(&k->ed);
+                if (ret == 0) {
+                    ret = wc_ed25519_import_private_key(*key_buffer,
+                            ED25519_KEY_SIZE, *pubkey, *pubkey_sz, &k->ed);
+                }
+
+                /* only free the key if we failed after allocating */
+                if (ret != 0 && initRet == 0)
+                    wc_ed25519_free(&k->ed);
+            }
+
+            if (ret != 0) {
+                free(*pubkey);
+                *pubkey = NULL;
+            }
+
+            /* break if we succeed or are not using auto */
+            if (ret == 0 || sign != SIGN_AUTO) {
+                if (CMD.header_sz < 256)
+                    CMD.header_sz = 256;
+                if (secondary)
+                    CMD.secondary_signature_sz = 64;
+                else
+                    CMD.signature_sz = 64;
+                sign = SIGN_ED25519;
+                printf("Found ED25519 key\n");
+                break;
+            }
+            FALL_THROUGH; /* we didn't solve the key, keep trying */
+
+        case SIGN_ED448:
+            ret = -1;
+            initRet = -1;
+            *pubkey_sz = ED448_PUB_KEY_SIZE;
+            *pubkey = malloc(*pubkey_sz);
+            if (*pubkey == NULL) {
+                printf("Pubkey malloc error!\n");
+                goto failure;
+            }
+
+            if (CMD.manual_sign || CMD.sha_only) {
+                /* raw */
+                if (*key_buffer_sz == KEYSTORE_PUBKEY_SIZE_ED448) {
+                    memcpy(*pubkey, *key_buffer, KEYSTORE_PUBKEY_SIZE_ED448);
+                    ret = 0;
+                }
+                else {
+                    initRet = ret = wc_ed448_init(&k->ed4);
+                    if (ret == 0) {
+                        idx = 0;
+                        ret = wc_Ed448PublicKeyDecode(*key_buffer, &idx,
+                            &k->ed4, *key_buffer_sz);
+                    }
+                    if (ret == 0) {
+                        ret = wc_ed448_export_public(&k->ed4, *pubkey,
+                            pubkey_sz);
+                    }
+
+                    /* free key no matter what */
+                    if (initRet == 0)
+                        wc_ed448_free(&k->ed4);
+
+                }
+            }
+            /* raw only */
+            else if (*key_buffer_sz == ED448_PRV_KEY_SIZE) {
+                memcpy(*pubkey, *key_buffer + ED448_KEY_SIZE,
+                    ED448_PUB_KEY_SIZE);
+
+                initRet = ret = wc_ed448_init(&k->ed4);
+                if (ret == 0) {
+                    ret = wc_ed448_import_private_key(*key_buffer,
+                        ED448_KEY_SIZE, *pubkey, *pubkey_sz, &k->ed4);
+                }
+
+                /* only free the key if we failed after allocating */
+                if (ret != 0 && initRet == 0)
+                    wc_ed448_free(&k->ed4);
+            }
+
+            if (ret != 0) {
+                free(*pubkey);
+                *pubkey = NULL;
+            }
+
+            /* break if we succeed or are not using auto */
+            if (ret == 0 || sign != SIGN_AUTO) {
+                if (CMD.header_sz < 512)
+                    CMD.header_sz = 512;
+                if (secondary)
+                    CMD.secondary_signature_sz = 114;
+                else
+                    CMD.signature_sz = 114;
+                sign = SIGN_ED448;
+                printf("Found ED448 key\n");
+                break;
+            }
+            FALL_THROUGH; /* we didn't solve the key, keep trying */
+
+        case SIGN_ECC256:
+            ret = load_key_ecc(SIGN_ECC256, 32, ECC_SECP256R1, 256,
+                key_buffer, key_buffer_sz, pubkey, pubkey_sz, secondary);
+            if (ret == 0)
+                break;
+            FALL_THROUGH;
+        case SIGN_ECC384:
+            ret = load_key_ecc(SIGN_ECC384, 48, ECC_SECP384R1, 512,
+                key_buffer, key_buffer_sz, pubkey, pubkey_sz, secondary);
+            if (ret == 0)
+                break;
+            FALL_THROUGH;
+        case SIGN_ECC521:
+            ret = load_key_ecc(SIGN_ECC521, 66, ECC_SECP521R1, 512,
+                key_buffer, key_buffer_sz, pubkey, pubkey_sz, secondary);
+            if (ret == 0)
+                break;
+            FALL_THROUGH; /* we didn't solve the key, keep trying */
+
+        case SIGN_RSA2048:
+            ret = load_key_rsa(SIGN_RSA2048, 256, KEYSTORE_PUBKEY_SIZE_RSA2048, 512,
+                key_buffer, key_buffer_sz, pubkey, pubkey_sz, secondary);
+            if (ret == 0)
+                break;
+            FALL_THROUGH; /* we didn't solve the key, keep trying */
+        case SIGN_RSA3072:
+            ret = load_key_rsa(SIGN_RSA3072, 384, KEYSTORE_PUBKEY_SIZE_RSA3072, 512,
+                key_buffer, key_buffer_sz, pubkey, pubkey_sz, secondary);
+            if (ret == 0)
+                break;
+            FALL_THROUGH; /* we didn't solve the key, keep trying */
+        case SIGN_RSA4096:
+            ret = load_key_rsa(SIGN_RSA4096, 512, KEYSTORE_PUBKEY_SIZE_RSA4096, 1024,
+                key_buffer, key_buffer_sz, pubkey, pubkey_sz, secondary);
+            if (ret == 0)
+                break;
+
+            FALL_THROUGH; /* we didn't solve the key, keep trying */
+        case SIGN_RSAPSS2048:
+            ret = load_key_rsa(SIGN_RSAPSS2048, 256, KEYSTORE_PUBKEY_SIZE_RSA2048, 512,
+                key_buffer, key_buffer_sz, pubkey, pubkey_sz, secondary);
+            if (ret == 0)
+                break;
+            FALL_THROUGH;
+        case SIGN_RSAPSS3072:
+            ret = load_key_rsa(SIGN_RSAPSS3072, 384, KEYSTORE_PUBKEY_SIZE_RSA3072, 512,
+                key_buffer, key_buffer_sz, pubkey, pubkey_sz, secondary);
+            if (ret == 0)
+                break;
+            FALL_THROUGH;
+        case SIGN_RSAPSS4096:
+            ret = load_key_rsa(SIGN_RSAPSS4096, 512, KEYSTORE_PUBKEY_SIZE_RSA4096, 1024,
+                key_buffer, key_buffer_sz, pubkey, pubkey_sz, secondary);
+            if (ret == 0)
+                break;
+
+            FALL_THROUGH; /* we didn't solve the key, keep trying */
+        case SIGN_LMS:
+            ret = -1;
+
+            if (sign == SIGN_AUTO) {
+                /* LMS is stateful and requires additional config, and is not
+                 * compatible with SIGN_AUTO. */
+                printf("error: SIGN_AUTO with LMS is not supported\n");
+                break;
+            }
+
+            /* The LMS file callbacks will handle writing and reading the
+             * private key. We only need to set the public key here.
+             *
+             * If both priv/pub are present:
+             *  - The first 64 bytes is the private key.
+             *  - The next 60 bytes is the public key. */
+            if (*key_buffer_sz == (HSS_MAX_PRIVATE_KEY_LEN +
+                                    KEYSTORE_PUBKEY_SIZE_LMS)) {
+                /* priv + pub */
+                *pubkey_sz = KEYSTORE_PUBKEY_SIZE_LMS;
+                *pubkey = malloc(*pubkey_sz);
+                if (*pubkey == NULL) {
+                    printf("Pubkey malloc error!\n");
+                    goto failure;
+                }
+                memcpy(*pubkey, (*key_buffer) + HSS_MAX_PRIVATE_KEY_LEN, *pubkey_sz);
+                ret = 0;
+                printf("Found LMS key\n");
+                break;
+            }
+            else if (*key_buffer_sz == KEYSTORE_PUBKEY_SIZE_LMS) {
+                /* pub only */
+                *pubkey_sz = KEYSTORE_PUBKEY_SIZE_LMS;
+                *pubkey = malloc(*pubkey_sz);
+                if (*pubkey == NULL) {
+                    printf("Pubkey malloc error!\n");
+                    goto failure;
+                }
+                memcpy(*pubkey, *key_buffer, *pubkey_sz);
+                ret = 0;
+                printf("Found LMS public only key\n");
+                break;
+            }
+            else {
+                /* We don't recognize this as an LMS pub or private key. */
+                printf("error: unrecognized LMS key size: %d\n",
+                        *key_buffer_sz);
+            }
+
+            FALL_THROUGH; /* we didn't solve the key, keep trying */
+        case SIGN_XMSS:
+            ret = -1;
+
+            if (sign == SIGN_AUTO) {
+                /* XMSS is stateful and requires additional config, and is not
+                 * compatible with SIGN_AUTO. */
+                printf("error: SIGN_AUTO with XMSS is not supported\n");
+                break;
+            }
+
+            /* The XMSS file callbacks will handle writing and reading the
+             * private key. We only need to set the public key here.
+             *
+             * If both priv/pub are present:
+             *  - The first ?? bytes is the private key.
+             *  - The next 68 bytes is the public key. */
+            ret = wc_XmssKey_GetPrivLen(&k->xmss, &priv_sz);
+            if (ret != 0 || priv_sz <= 0) {
+                printf("error: wc_XmssKey_GetPrivLen returned %d\n", ret);
+                break;
+            }
+
+            DEBUG_PRINT("info: xmss sk len: %d\n", priv_sz);
+            DEBUG_PRINT("info: xmss pk len: %d\n", KEYSTORE_PUBKEY_SIZE_XMSS);
+
+            if (*key_buffer_sz == (priv_sz + KEYSTORE_PUBKEY_SIZE_XMSS)) {
+                /* priv + pub */
+                *pubkey_sz = KEYSTORE_PUBKEY_SIZE_XMSS;
+                *pubkey = malloc(*pubkey_sz);
+                if (*pubkey == NULL) {
+                    printf("Pubkey malloc error!\n");
+                    goto failure;
+                }
+                memcpy(*pubkey, (*key_buffer) + priv_sz, *pubkey_sz);
+                ret = 0;
+                printf("Found XMSS key\n");
+                break;
+            }
+            else if (*key_buffer_sz == KEYSTORE_PUBKEY_SIZE_XMSS) {
+                /* pub only */
+                *pubkey_sz = KEYSTORE_PUBKEY_SIZE_XMSS;
+                *pubkey = malloc(*pubkey_sz);
+                if (*pubkey == NULL) {
+                    printf("Pubkey malloc error!\n");
+                    goto failure;
+                }
+                memcpy(*pubkey, *key_buffer, *pubkey_sz);
+                ret = 0;
+                printf("Found XMSS public only key\n");
+                break;
+            }
+            else {
+                /* We don't recognize this as an XMSS pub or private key. */
+                printf("error: unrecognized XMSS key size: %d\n",
+                    *key_buffer_sz);
+            }
+            FALL_THROUGH; /* we didn't solve the key, keep trying */
+        case SIGN_ML_DSA:
+            ret = wc_MlDsaKey_GetPubLen(&k->ml_dsa, (int *)&pub_sz);
+
+            if (ret != 0 || pub_sz <= 0) {
+                printf("error: wc_MlDsaKey_GetPubLen returned %d\n", ret);
+                break;
+            }
+
+            /* Get the ML-DSA private key length. This API returns
+             * the public + private length. */
+            ret = wc_MlDsaKey_GetPrivLen(&k->ml_dsa, (int*)&priv_sz);
+
+            if (ret != 0 || priv_sz <= 0) {
+                printf("error: wc_MlDsaKey_GetPrivLen returned %d\n", ret);
+                break;
+            }
+
+            if (priv_sz <= pub_sz) {
+                printf("error: ml-dsa: unexpected key lengths: %d, %d",
+                       priv_sz, pub_sz);
+                break;
+            }
+            else {
+                priv_sz -= pub_sz;
+            }
+
+            DEBUG_PRINT("info: ml-dsa priv len: %d\n", priv_sz);
+            DEBUG_PRINT("info: ml-dsa pub len: %d\n", pub_sz);
+
+            if (*key_buffer_sz == (priv_sz + pub_sz)) {
+                /* priv + pub */
+                ret = wc_MlDsaKey_ImportPrivRaw(&k->ml_dsa, *key_buffer,
+                                                priv_sz);
+                *pubkey_sz = pub_sz;
+                *pubkey = malloc(*pubkey_sz);
+                if (*pubkey == NULL) {
+                    printf("Pubkey malloc error!\n");
+                    goto failure;
+                }
+                memcpy(*pubkey, (*key_buffer) + priv_sz, *pubkey_sz);
+                ret = 0;
+                printf("Found ml-dsa key\n");
+                break;
+            }
+            else if (*key_buffer_sz == pub_sz) {
+                /* pub only */
+                *pubkey_sz = pub_sz;
+                *pubkey = malloc(*pubkey_sz);
+                if (*pubkey == NULL) {
+                    printf("Pubkey malloc error!\n");
+                    goto failure;
+                }
+                memcpy(*pubkey, *key_buffer, *pubkey_sz);
+                ret = 0;
+                printf("Found ml-dsa public only key\n");
+                break;
+            }
+            else {
+                /* We don't recognize this as an ML-DSA pub or private key. */
+                printf("error: unrecognized ml-dsa key size: %d\n",
+                    *key_buffer_sz);
+                ret = -1;
+            }
+            break;
+    } /* end switch (sign) */
+
+    if (ret != 0) {
+        printf("Key decode error %d\n", ret);
+
+        goto failure;
+    }
+
+    DEBUG_PRINT("Pubkey %d\n", *pubkey_sz);
+    DEBUG_BUFFER(*pubkey, *pubkey_sz);
+    return *key_buffer;
+
+failure:
+    if (*key_buffer != NULL) {
+        zero_and_free(*key_buffer, *key_buffer_sz);
+        *key_buffer = NULL;
+    }
+    if (*pubkey != NULL) {
+        free(*pubkey);
+        *pubkey = NULL;
+    }
+    *pubkey_sz = 0;
+    return NULL;
+}
+
+/* Sign the digest */
+static int sign_digest(int sign, int hash_algo,
+    uint8_t* signature, uint32_t* signature_sz,
+    uint8_t* digest, uint32_t digest_sz, int secondary)
+{
+    int ret;
+    WC_RNG rng;
+    struct signing_key *k = key_obj(secondary);
+    printf("Sign: %02x\n", sign >> 8);
+
+    if ((ret = wc_InitRng(&rng)) != 0) {
+        return ret;
+    }
+
+    if (sign == SIGN_ED25519) {
+        ret = wc_ed25519_sign_msg(digest, digest_sz, signature,
+                signature_sz, &k->ed);
+    }
+    else
+    if (sign == SIGN_ED448) {
+        ret = wc_ed448_sign_msg(digest, digest_sz, signature,
+                signature_sz, &k->ed4, NULL, 0);
+    }
+    else
+    if (sign == SIGN_ECC256 ||
+        sign == SIGN_ECC384 ||
+        sign == SIGN_ECC521)
+    {
+        mp_int r, s;
+        int keySz;
+        if (sign == SIGN_ECC256) keySz = 32;
+        if (sign == SIGN_ECC384) keySz = 48;
+        if (sign == SIGN_ECC521) keySz = 66;
+
+        *signature_sz = keySz*2;
+        memset(signature, 0, *signature_sz);
+
+        mp_init(&r); mp_init(&s);
+        ret = wc_ecc_sign_hash_ex(digest, digest_sz, &rng, &k->ecc,
+                &r, &s);
+        if (ret == 0) {
+            word32 rSz, sSz;
+            /* export sign r/s - zero pad to key size */
+            rSz = mp_unsigned_bin_size(&r);
+            mp_to_unsigned_bin(&r, &signature[keySz - rSz]);
+            sSz = mp_unsigned_bin_size(&s);
+            mp_to_unsigned_bin(&s, &signature[keySz + (keySz - sSz)]);
+        }
+        mp_clear(&r); mp_clear(&s);
+    }
+    else
+    if (sign == SIGN_RSA2048 ||
+        sign == SIGN_RSA3072 ||
+        sign == SIGN_RSA4096)
+    {
+        #ifndef WC_MAX_ENCODED_DIG_ASN_SZ
+        #define WC_MAX_ENCODED_DIG_ASN_SZ 9 /* enum(bit or octet) + length(4) */
+        #endif
+        uint8_t  buf[WC_MAX_DIGEST_SIZE + WC_MAX_ENCODED_DIG_ASN_SZ];
+        uint32_t enchash_sz = digest_sz;
+        uint8_t* enchash = digest;
+        if (CMD.sign_wenc) {
+            /* add ASN.1 signature encoding */
+            int hashOID = 0;
+            if (hash_algo == HASH_SHA256)
+                hashOID = SHA256h;
+            else if (hash_algo == HASH_SHA384)
+                hashOID = SHA384h;
+            else if (hash_algo == HASH_SHA3)
+                hashOID = SHA3_384h;
+            enchash_sz = wc_EncodeSignature(buf, digest, digest_sz, hashOID);
+            enchash = buf;
+        }
+        ret = wc_RsaSSL_Sign(enchash, enchash_sz, signature, *signature_sz,
+                &k->rsa, &rng);
+        if (ret > 0) {
+            *signature_sz = ret;
+            ret = 0;
+        }
+    }
+    else
+    if (sign == SIGN_RSAPSS2048 ||
+        sign == SIGN_RSAPSS3072 ||
+        sign == SIGN_RSAPSS4096)
+    {
+        enum wc_HashType hash_type;
+        int mgf;
+        if (hash_algo == HASH_SHA256) {
+            hash_type = WC_HASH_TYPE_SHA256;
+            mgf = WC_MGF1SHA256;
+        } else if (hash_algo == HASH_SHA384) {
+            hash_type = WC_HASH_TYPE_SHA384;
+            mgf = WC_MGF1SHA384;
+        } else {
+            fprintf(stderr, "RSA-PSS requires SHA-256 or SHA-384\n");
+            ret = -1;
+        }
+        if (ret == 0) {
+            ret = wc_RsaPSS_Sign(digest, digest_sz, signature, *signature_sz,
+                    hash_type, mgf, &k->rsa, &rng);
+            if (ret > 0) {
+                *signature_sz = ret;
+                ret = 0;
+            }
+        }
+    }
+    else
+    if (sign == SIGN_LMS) {
+        const char *key_file = CMD.key_file;
+        if (secondary) {
+            key_file = CMD.secondary_key_file;
+        }
+        /* Set the callbacks, so LMS can update the private key while signing */
+        ret = wc_LmsKey_SetWriteCb(&k->lms, lms_write_key);
+        if (ret == 0) {
+            ret = wc_LmsKey_SetReadCb(&k->lms, lms_read_key);
+        }
+        if (ret == 0) {
+            ret = wc_LmsKey_SetContext(&k->lms, (void*)key_file);
+        }
+        if (ret == 0) {
+            ret = wc_LmsKey_Reload(&k->lms);
+        }
+        if (ret == 0) {
+            ret = wc_LmsKey_Sign(&k->lms, signature, signature_sz, digest,
+                                 digest_sz);
+        }
+        if (ret != 0) {
+            fprintf(stderr, "error signing with LMS: %d\n", ret);
+        }
+    }
+    else
+    if (sign == SIGN_XMSS) {
+        const char *key_file = CMD.key_file;
+        if (secondary) {
+            key_file = CMD.secondary_key_file;
+        }
+        ret = wc_XmssKey_Init(&k->xmss, NULL, INVALID_DEVID);
+        /* Set the callbacks, so XMSS can update the private key while signing */
+        if (ret == 0) {
+            ret = wc_XmssKey_SetWriteCb(&k->xmss, xmss_write_key);
+        }
+        if (ret == 0) {
+            ret = wc_XmssKey_SetReadCb(&k->xmss, xmss_read_key);
+        }
+        if (ret == 0) {
+            ret = wc_XmssKey_SetContext(&k->xmss, (void*)key_file);
+        }
+        if (ret == 0) {
+            ret = wc_XmssKey_SetParamStr(&k->xmss, WOLFBOOT_XMSS_PARAMS);
+        }
+        if (ret == 0) {
+            ret = wc_XmssKey_Reload(&k->xmss);
+        }
+        if (ret == 0) {
+            ret = wc_XmssKey_Sign(&k->xmss, signature, signature_sz, digest,
+                                 digest_sz);
+        }
+        if (ret != 0) {
+            fprintf(stderr, "error signing with XMSS: %d\n", ret);
+        }
+    }
+    else
+    if (sign == SIGN_ML_DSA) {
+        /* Nothing else to do, ready to sign. */
+        if (ret == 0) {
+            ret = wc_MlDsaKey_SignCtx(&k->ml_dsa, NULL, 0,
+                                      signature, signature_sz,
+                                      digest, digest_sz, &rng);
+        }
+        if (ret != 0) {
+            fprintf(stderr, "error signing with ML-DSA: %d\n", ret);
+        }
+    }
+    else
+    {
+        ret = NOT_COMPILED_IN;
+    }
+    wc_FreeRng(&rng);
+    return ret;
+}
+
+#define ALIGN_8(x) while ((x % 8) != 4) { x++; }
+#define ALIGN_4(x) while ((x % 4) != 0) { x++; }
+
+static void header_size_align_8(uint32_t *idx)
+{
+    while ((*idx % 8U) != 4U) {
+        (*idx)++;
+    }
+}
+
+static void header_size_align_4(uint32_t *idx)
+{
+    while ((*idx % 4U) != 0U) {
+        (*idx)++;
+    }
+}
+
+static void header_size_append_tag(uint32_t *idx, uint32_t len)
+{
+    *idx += 4U + len;
+}
+
+static uint32_t header_digest_size(int hash_algo)
+{
+    switch (hash_algo) {
+        case HASH_SHA256:
+            return HDR_SHA256_LEN;
+        case HASH_SHA384:
+            return HDR_SHA384_LEN;
+        case HASH_SHA3:
+            return HDR_SHA3_384_LEN;
+        default:
+            return 0;
+    }
+}
+
+/* Hash the first `totalsize` header-field bytes of a DTB with the image hash
+ * algorithm (the same span the bootloader hashes). Applies at least fdt_open()'s
+ * checks (magic, version range); intentionally stricter. Writes digest to out,
+ * length to out_sz. Returns 0 on success, -1 on error. */
+static int dts_hash_file(const char *file, int hash_algo, uint8_t *out,
+    uint32_t *out_sz)
+{
+    /* FDT header (big-endian, 40B): magic@0, totalsize@4, version@0x14,
+     * last_comp_version@0x18. */
+    const uint32_t FDT_MAGIC = 0xd00dfeedU;
+    const uint32_t FDT_HDR_SIZE = 40U;
+    /* Must track include/fdt.h's FDT_SUPPORTED_VERSION: the bootloader
+     * parser accepts v17 and later only, so signing a v16 blob here would
+     * produce an image that fails to boot. */
+    const uint32_t FDT_FIRST_VER = 0x11U;
+    const uint32_t FDT_LAST_COMP_VER = 0x11U;
+    FILE *f;
+    uint8_t hdr[40];
+    uint8_t rbuf[4096];
+    uint32_t magic, total, version, last_comp, remain;
+    long fsz;
+    size_t rd, want;
+    int ret = -1;
+
+    f = fopen(file, "rb");
+    if (f == NULL) {
+        fprintf(stderr, "Cannot open device tree file %s: %s\n",
+            file, strerror(errno));
+        return -1;
+    }
+
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
+        fprintf(stderr, "Device tree file %s too small for an FDT header\n",
+            file);
+        fclose(f);
+        return -1;
+    }
+    magic = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
+            ((uint32_t)hdr[2] << 8)  | (uint32_t)hdr[3];
+    total = ((uint32_t)hdr[4] << 24) | ((uint32_t)hdr[5] << 16) |
+            ((uint32_t)hdr[6] << 8)  | (uint32_t)hdr[7];
+    version = ((uint32_t)hdr[0x14] << 24) | ((uint32_t)hdr[0x15] << 16) |
+              ((uint32_t)hdr[0x16] << 8)  | (uint32_t)hdr[0x17];
+    last_comp = ((uint32_t)hdr[0x18] << 24) | ((uint32_t)hdr[0x19] << 16) |
+                ((uint32_t)hdr[0x1A] << 8) | (uint32_t)hdr[0x1B];
+    if (magic != FDT_MAGIC) {
+        fprintf(stderr, "Not a valid device tree (bad FDT magic): %s\n", file);
+        fclose(f);
+        return -1;
+    }
+    if (total < FDT_HDR_SIZE || version < FDT_FIRST_VER ||
+            last_comp > FDT_LAST_COMP_VER) {
+        fprintf(stderr, "Unsupported device tree (version %u, comp %u, "
+            "totalsize %u): %s -- the bootloader would reject it\n",
+            version, last_comp, total, file);
+        fclose(f);
+        return -1;
+    }
+    /* A file shorter than the declared totalsize can't be hashed as
+     * declared (reject);
+     * a longer one (trailing padding) is hashed over the declared span (warn). */
+    fseek(f, 0, SEEK_END);
+    fsz = ftell(f);
+    if (fsz >= 0 && (uint32_t)fsz < total) {
+        fprintf(stderr, "Device tree file %s is %ld bytes but its FDT totalsize "
+            "is %u (truncated)\n", file, fsz, total);
+        fclose(f);
+        return -1;
+    }
+    if (fsz >= 0 && (uint32_t)fsz != total) {
+        fprintf(stderr, "Warning: device tree file %s is %ld bytes but its FDT "
+            "totalsize is %u; hashing the first %u bytes\n",
+            file, fsz, total, total);
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
+    remain = total;
+
+    if (hash_algo == HASH_SHA256) {
+    #ifndef NO_SHA256
+        wc_Sha256 sha;
+        ret = wc_InitSha256_ex(&sha, NULL, INVALID_DEVID);
+        if (ret == 0) {
+            while (remain > 0) {
+                want = (remain < sizeof(rbuf)) ? remain : sizeof(rbuf);
+                rd = fread(rbuf, 1, want, f);
+                if (rd == 0) { ret = -1; break; }
+                ret = wc_Sha256Update(&sha, rbuf, (word32)rd);
+                if (ret != 0) break;
+                remain -= (uint32_t)rd;
+            }
+            if (ret == 0)
+                ret = wc_Sha256Final(&sha, out);
+            wc_Sha256Free(&sha);
+        }
+        *out_sz = HDR_SHA256_LEN;
+    #endif
+    }
+    else if (hash_algo == HASH_SHA384) {
+    #ifndef NO_SHA384
+        wc_Sha384 sha;
+        ret = wc_InitSha384_ex(&sha, NULL, INVALID_DEVID);
+        if (ret == 0) {
+            while (remain > 0) {
+                want = (remain < sizeof(rbuf)) ? remain : sizeof(rbuf);
+                rd = fread(rbuf, 1, want, f);
+                if (rd == 0) { ret = -1; break; }
+                ret = wc_Sha384Update(&sha, rbuf, (word32)rd);
+                if (ret != 0) break;
+                remain -= (uint32_t)rd;
+            }
+            if (ret == 0)
+                ret = wc_Sha384Final(&sha, out);
+            wc_Sha384Free(&sha);
+        }
+        *out_sz = HDR_SHA384_LEN;
+    #endif
+    }
+    else if (hash_algo == HASH_SHA3) {
+    #ifdef WOLFSSL_SHA3
+        wc_Sha3 sha;
+        ret = wc_InitSha3_384(&sha, NULL, INVALID_DEVID);
+        if (ret == 0) {
+            while (remain > 0) {
+                want = (remain < sizeof(rbuf)) ? remain : sizeof(rbuf);
+                rd = fread(rbuf, 1, want, f);
+                if (rd == 0) { ret = -1; break; }
+                ret = wc_Sha3_384_Update(&sha, rbuf, (word32)rd);
+                if (ret != 0) break;
+                remain -= (uint32_t)rd;
+            }
+            if (ret == 0)
+                ret = wc_Sha3_384_Final(&sha, out);
+            wc_Sha3_384_Free(&sha);
+        }
+        *out_sz = HDR_SHA3_384_LEN;
+    #endif
+    }
+
+    fclose(f);
+    return ret;
+}
+
+/* Test hook: the content header_idx from the last successful make_header_ex()
+ * (recorded before the 0xFF padding), so unit tests can compare the writer
+ * against header_required_size() without the auto-grow exit(1) path. */
+static uint32_t test_last_header_idx;
+
+static uint32_t header_required_size(int is_diff, uint32_t cert_chain_sz,
+    uint32_t secondary_key_sz)
+{
+    uint32_t idx = 0;
+    uint32_t digest_sz = header_digest_size(CMD.hash_algo);
+    uint32_t i;
+
+    idx += 2U * sizeof(uint32_t);
+    header_size_append_tag(&idx, HDR_VERSION_LEN);
+    header_size_align_8(&idx);
+
+    if (!CMD.no_ts) {
+        header_size_append_tag(&idx, HDR_TIMESTAMP_LEN);
+    }
+
+    header_size_append_tag(&idx, HDR_IMG_TYPE_LEN);
+
+    if (is_diff) {
+        header_size_align_4(&idx);
+        header_size_append_tag(&idx, 4);
+        header_size_append_tag(&idx, 4);
+        header_size_align_4(&idx);
+        header_size_append_tag(&idx, 4);
+        header_size_append_tag(&idx, 4);
+
+        if (!CMD.no_base_sha && digest_sz > 0U) {
+            header_size_align_8(&idx);
+            header_size_append_tag(&idx, digest_sz);
+        }
+    }
+
+    for (i = 0; i < CMD.custom_tlvs; i++) {
+        header_size_align_8(&idx);
+        header_size_append_tag(&idx, CMD.custom_tlv[i].len);
+    }
+
+    if (CMD.dts_file != NULL && digest_sz > 0U) {
+        header_size_align_8(&idx);
+        header_size_append_tag(&idx, digest_sz);
+    }
+
+    if (cert_chain_sz > 0U) {
+        header_size_align_8(&idx);
+        header_size_append_tag(&idx, cert_chain_sz);
+    }
+
+    if (digest_sz > 0U) {
+        header_size_align_8(&idx);
+        header_size_append_tag(&idx, digest_sz);
+        header_size_align_8(&idx);
+
+        if (CMD.hybrid && secondary_key_sz > 0U) {
+            header_size_append_tag(&idx, 2);
+            if (CMD.hash_algo == HASH_SHA256)
+                header_size_align_8(&idx);
+            header_size_append_tag(&idx, digest_sz);
+            header_size_align_8(&idx);
+        }
+
+        header_size_append_tag(&idx, digest_sz);
+    }
+
+    if (CMD.sign != NO_SIGN) {
+        header_size_align_8(&idx);
+        header_size_append_tag(&idx, CMD.signature_sz);
+
+        if (CMD.hybrid) {
+            header_size_align_8(&idx);
+            header_size_append_tag(&idx, CMD.secondary_signature_sz);
+        }
+
+        if (CMD.policy_sign) {
+            uint32_t policy_sig_sz = CMD.policy_sz;
+            if (policy_sig_sz == 0U) {
+                policy_sig_sz = CMD.signature_sz;
+            }
+            header_size_align_8(&idx);
+            header_size_append_tag(&idx,
+                policy_sig_sz + (uint32_t)sizeof(uint32_t));
+        }
+    }
+
+    return idx;
+}
+
+static int make_header_ex(int is_diff, uint8_t *pubkey, uint32_t pubkey_sz,
+        const char *image_file, const char *outfile,
+        uint32_t delta_base_version, uint32_t patch_len, uint32_t patch_inv_off,
+        uint32_t patch_inv_len, const uint8_t *secondary_key, uint32_t secondary_key_sz,
+        uint8_t *base_hash, uint32_t base_hash_sz)
+{
+    uint32_t header_idx;
+    uint8_t *header = NULL;
+    FILE *f = NULL, *f2 = NULL, *fek = NULL, *fef = NULL;
+    uint32_t fw_version32;
+    struct stat attrib;
+    uint16_t image_type;
+    uint8_t* signature = NULL;
+    uint8_t* secondary_signature = NULL;
+    uint8_t* policy = NULL;
+    int ret = -1;
+    uint8_t  buf[4096];
+    uint8_t  second_buf[4096];
+    uint8_t  key[ENC_MAX_KEY_SZ];
+    uint8_t  iv[ENC_MAX_IV_SZ];
+    uint32_t read_sz, pos;
+    uint8_t  digest[48]; /* max digest */
+    uint32_t digest_sz = 0;
+    uint32_t image_sz = 0;
+    int io_sz;
+    uint8_t*    cert_chain    = NULL;
+    uint32_t    cert_chain_sz = 0;
+
+    XMEMSET(key, 0, sizeof(key));
+    XMEMSET(iv, 0, sizeof(iv));
+
+    /* Check certificate chain file size before allocating header, and adjust
+     * header size if needed */
+    if ((CMD.cert_chain_file != NULL) || (CMD.custom_tlvs > 0) ||
+            (CMD.dts_file != NULL)) {
+        uint32_t hdr_cert_chain_sz = 0;
+        uint32_t required_space;
+
+        if (CMD.cert_chain_file != NULL) {
+            struct stat file_stat;
+            if (stat(CMD.cert_chain_file, &file_stat) == 0) {
+                off_t chain_file_sz = file_stat.st_size;
+                if (chain_file_sz < 0) {
+                    printf("Warning: certificate chain file size is invalid "
+                        "(%" PRIdMAX ")\n", (intmax_t)chain_file_sz);
+                }
+                else if ((uintmax_t)chain_file_sz > (uintmax_t)MAX_TLV_LEN) {
+                    printf("Error: Certificate chain too large for TLV encoding "
+                        "(%" PRIuMAX " > %u)\n", (uintmax_t)chain_file_sz, MAX_TLV_LEN);
+                    goto failure;
+                }
+                else {
+                    hdr_cert_chain_sz = (uint32_t)chain_file_sz;
+                }
+            }
+            else {
+                printf("Warning: Could not stat certificate chain file %s: %s\n",
+                       CMD.cert_chain_file, strerror(errno));
+            }
+        }
+
+        required_space =
+            header_required_size(is_diff, hdr_cert_chain_sz, secondary_key_sz);
+
+        /* If the current header size is too small, increase it */
+        if (CMD.header_sz < required_space) {
+            /* Round up to nearest power of 2 that can hold all fields */
+            const uint32_t min_header_size = 256;
+            uint32_t       new_size        = min_header_size;
+            while (new_size < required_space) {
+                if (new_size > (UINT32_MAX / 2U)) {
+                    printf("Error: Header size overflow while sizing "
+                        "manifest header\n");
+                    goto failure;
+                }
+                new_size *= 2;
+            }
+
+            fprintf(stderr, "Warning: increasing header size from %u to %u "
+                "bytes to fit manifest header fields.\n"
+                "Warning: wolfBoot must be built with IMAGE_HEADER_SIZE=%u "
+                "or it will not find the firmware image.\n",
+                CMD.header_sz, new_size, new_size);
+            CMD.header_sz = new_size;
+        }
+    }
+
+    header_idx = 0;
+    header = malloc(CMD.header_sz);
+    if (header == NULL) {
+        printf("Header malloc error!\n");
+        goto failure;
+    }
+    memset(header, 0xFF, CMD.header_sz);
+
+    /* Get size of image */
+    f = fopen(image_file, "rb");
+    if (f == NULL) {
+        printf("Open image file %s failed\n", image_file);
+        goto failure;
+    }
+    fseek(f, 0, SEEK_END);
+    image_sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    fclose(f);
+    f = NULL; /* avoid a double fclose() if a later step jumps to 'failure' */
+
+    /* Append Magic header (spells 'WOLF') */
+    header_append_u32(header, &header_idx, WOLFBOOT_MAGIC);
+    /* Append Image size */
+    header_append_u32(header, &header_idx, image_sz);
+
+    /* No pad bytes, version is aligned */
+
+    /* Append Version field */
+    {
+        unsigned long tmp_ver;
+        errno = 0;
+        tmp_ver = strtoul(CMD.fw_version, NULL, 10);
+        if (errno == ERANGE || tmp_ver > (unsigned long)UINT32_MAX) {
+            fprintf(stderr, "Error: firmware version out of range: %s\n",
+                    CMD.fw_version);
+            goto failure;
+        }
+        fw_version32 = (uint32_t)tmp_ver;
+    }
+    header_append_tag_u32(header, &header_idx, HDR_VERSION, fw_version32);
+
+    /* Append pad bytes, so timestamp val field is 8-byte aligned */
+    ALIGN_8(header_idx);
+
+    if (!CMD.no_ts) {
+        /* Append Timestamp field */
+        stat(image_file, &attrib);
+        header_append_tag_u64(header, &header_idx, HDR_TIMESTAMP,
+            (uint64_t)attrib.st_ctime);
+    }
+
+    /* Append Image type field */
+    image_type = (uint16_t)CMD.sign & HDR_IMG_TYPE_AUTH_MASK;
+    image_type |= CMD.partition_id;
+    if (is_diff)
+        image_type |= HDR_IMG_TYPE_DIFF;
+    header_append_tag_u16(header, &header_idx, HDR_IMG_TYPE, image_type);
+
+    if (is_diff) {
+        /* Append pad bytes, so fields are 4-byte aligned */
+        ALIGN_4(header_idx);
+        header_append_tag_u32(header, &header_idx, HDR_IMG_DELTA_BASE,
+            delta_base_version);
+        header_append_tag_u32(header, &header_idx, HDR_IMG_DELTA_SIZE,
+            patch_len);
+
+        /* Append pad bytes, so fields are 4-byte aligned */
+        ALIGN_4(header_idx);
+        header_append_tag_u32(header, &header_idx, HDR_IMG_DELTA_INVERSE,
+            patch_inv_off);
+        header_append_tag_u32(header, &header_idx, HDR_IMG_DELTA_INVERSE_SIZE,
+            patch_inv_len);
+
+        if (!CMD.no_base_sha) {
+            /* Append pad bytes, so base hash is 8-byte aligned */
+            ALIGN_8(header_idx);
+            if (!base_hash) {
+                fprintf(stderr, "Base hash for delta image not found.\n");
+                goto failure;
+            }
+            if (CMD.hash_algo == HASH_SHA256) {
+                if (base_hash_sz != HDR_SHA256_LEN) {
+                    fprintf(stderr, "Invalid base hash size for SHA256.\n");
+                    goto failure;
+                }
+                header_append_tag(header, &header_idx, HDR_IMG_DELTA_BASE_HASH,
+                        HDR_SHA256_LEN, base_hash);
+            } else if (CMD.hash_algo == HASH_SHA384) {
+                if  (base_hash_sz != HDR_SHA384_LEN) {
+                    fprintf(stderr, "Invalid base hash size for SHA384.\n");
+                    goto failure;
+                }
+                header_append_tag(header, &header_idx, HDR_IMG_DELTA_BASE_HASH,
+                        HDR_SHA384_LEN, base_hash);
+            } else if (CMD.hash_algo == HASH_SHA3) {
+                if (base_hash_sz != HDR_SHA3_384_LEN) {
+                    fprintf(stderr, "Invalid base hash size for SHA3-384.\n");
+                    goto failure;
+                }
+                header_append_tag(header, &header_idx, HDR_IMG_DELTA_BASE_HASH,
+                        HDR_SHA3_384_LEN, base_hash);
+            }
+        }
+    }
+
+    /* Add custom TLVs */
+    if (CMD.custom_tlvs > 0) {
+        uint32_t i;
+        /* A custom TLV reusing a built-in tag is serialized before the
+         * generated TLV and shadows it: wolfBoot_find_header() walks from the
+         * start and returns the first match. The device-tree digest (0x35) is
+         * the reserved tag reachable from --custom-tlv (tags >= 0x30); a
+         * custom 0x35 ahead of the --dts digest would make DTB verification
+         * use the operator-supplied value. Reject the collision. */
+        for (i = 0; i < CMD.custom_tlvs; i++) {
+            if (CMD.dts_file != NULL &&
+                CMD.custom_tlv[i].tag == HDR_DEVICE_TREE_DIGEST) {
+                fprintf(stderr,
+                    "Error: custom TLV tag 0x%04x is reserved for --dts\n",
+                    (unsigned)HDR_DEVICE_TREE_DIGEST);
+                goto failure;
+            }
+        }
+        for (i = 0; i < CMD.custom_tlvs; i++) {
+            /* require 8-byte alignment */
+            /* The offset '4' takes into account 2B Tag + 2B Len, so that the
+             * Value starts at (addr % 8 == 0) position.
+             */
+            ALIGN_8(header_idx);
+
+            if (CMD.custom_tlv[i].buffer == NULL) {
+                uint8_t tmp[sizeof(CMD.custom_tlv[i].val)];
+                header_store_u64_le(tmp, CMD.custom_tlv[i].val);
+                header_append_tag(header, &header_idx, CMD.custom_tlv[i].tag,
+                    CMD.custom_tlv[i].len, tmp);
+            } else {
+                header_append_tag(header, &header_idx, CMD.custom_tlv[i].tag,
+                    CMD.custom_tlv[i].len, CMD.custom_tlv[i].buffer);
+            }
+        }
+    }
+
+    /* Signature-covered digest of a raw (non-FIT) device tree. */
+    if (CMD.dts_file != NULL) {
+        uint8_t  dts_digest[48]; /* max digest */
+        uint32_t dts_digest_sz = 0;
+        if (dts_hash_file(CMD.dts_file, CMD.hash_algo, dts_digest,
+                &dts_digest_sz) != 0 || dts_digest_sz == 0) {
+            printf("Error hashing device tree file %s\n", CMD.dts_file);
+            goto failure;
+        }
+        ALIGN_8(header_idx);
+        header_append_tag(header, &header_idx, HDR_DEVICE_TREE_DIGEST,
+            (uint16_t)dts_digest_sz, dts_digest);
+        printf("Device tree digest (%u bytes) bound to image\n", dts_digest_sz);
+    }
+
+    /* Read certificate chain if provided */
+    if (CMD.cert_chain_file != NULL) {
+        const size_t cert_chain_tlv_hdr_sz = 4;
+        struct stat  file_stat;
+        f = fopen(CMD.cert_chain_file, "rb");
+        if (f == NULL) {
+            printf("Open certificate chain file %s failed: %s\n",
+                   CMD.cert_chain_file, strerror(errno));
+            goto failure;
+        }
+
+        /* Get the file size */
+        if (stat(CMD.cert_chain_file, &file_stat) != 0) {
+            printf("Could not get certificate chain file size: %s\n",
+                   strerror(errno));
+            fclose(f);
+            f = NULL;
+            goto failure;
+        }
+
+        if ((file_stat.st_size < 0) ||
+            ((uintmax_t)file_stat.st_size > (uintmax_t)UINT32_MAX)) {
+            printf("Error: Invalid certificate chain file size (%" PRIdMAX ")\n",
+                   (intmax_t)file_stat.st_size);
+            fclose(f);
+            f = NULL;
+            goto failure;
+        }
+        cert_chain_sz = (uint32_t)file_stat.st_size;
+
+        if (cert_chain_sz > (uint32_t)MAX_TLV_LEN) {
+            printf("Error: Certificate chain too large for TLV encoding "
+                   "(%u > %u)\n",
+                   cert_chain_sz, (unsigned int)MAX_TLV_LEN);
+            fclose(f);
+            f = NULL;
+            goto failure;
+        }
+
+        /* Verify that the chain will fit in our header */
+        if (header_idx + cert_chain_tlv_hdr_sz + cert_chain_sz >
+            CMD.header_sz) {
+            printf("Error: Certificate chain too large for header (%u bytes "
+                   "needed, %u available)\n",
+                   (unsigned int)(header_idx + cert_chain_tlv_hdr_sz +
+                                  cert_chain_sz),
+                   CMD.header_sz);
+            fclose(f);
+            f = NULL;
+            goto failure;
+        }
+
+        cert_chain = malloc(cert_chain_sz);
+        if (cert_chain == NULL) {
+            printf("Certificate chain buffer malloc error!\n");
+            fclose(f);
+            f = NULL;
+            goto failure;
+        }
+
+        /* Read the entire file into the buffer */
+        io_sz = (int)fread(cert_chain, 1, cert_chain_sz, f);
+        fclose(f);
+        f = NULL;
+
+        if (io_sz != (int)cert_chain_sz) {
+            printf("Error reading certificate chain file: %s\n",
+                   strerror(errno));
+            goto failure;
+        }
+
+        /* Append the certificate chain TLV - require 8-byte alignment */
+        ALIGN_8(header_idx);
+        header_append_tag(header, &header_idx, HDR_CERT_CHAIN, cert_chain_sz,
+                          cert_chain);
+
+        printf("Added certificate chain (%d bytes)\n", cert_chain_sz);
+    }
+
+    /* Add padding bytes. Sha-3 val field requires 8-byte alignment */
+    /* The offset '4' takes into account 2B Tag + 2B Len, so that the Value
+     * starts at (addr % 8 == 0) position.
+     */
+    ALIGN_8(header_idx);
+
+    /* Calculate hashes */
+    if (CMD.hash_algo == HASH_SHA256)
+    {
+    #ifndef NO_SHA256
+        wc_Sha256 sha;
+        digest_sz = SHA256_DIGEST_SIZE;
+        /* pubkey hash calculation */
+        ret = wc_InitSha256_ex(&sha, NULL, INVALID_DEVID);
+        if (ret == 0) {
+            printf("Hashing primary pubkey, size: %d\n", pubkey_sz);
+            ret = wc_Sha256Update(&sha, pubkey, pubkey_sz);
+            if (ret == 0)
+                wc_Sha256Final(&sha, buf);
+            wc_Sha256Free(&sha);
+            /* Add Pubkey Hash to header */
+            header_append_tag(header, &header_idx, HDR_PUBKEY, digest_sz, buf);
+            DEBUG_PRINT("Pubkey hash %d\n", digest_sz);
+            DEBUG_BUFFER(buf, digest_sz);
+            ALIGN_8(header_idx);
+        }
+        /* secondary public key in hybrid mode */
+        if (ret == 0 && CMD.hybrid && secondary_key_sz > 0) {
+            ret = wc_InitSha256_ex(&sha, NULL, INVALID_DEVID);
+            DEBUG_PRINT("Hashing secondary pubkey, size: %d\n", secondary_key_sz);
+            if (ret == 0) {
+                ret = wc_Sha256Update(&sha, secondary_key, secondary_key_sz);
+                if (ret == 0)
+                    wc_Sha256Final(&sha, second_buf);
+                wc_Sha256Free(&sha);
+                /* Add Secondary cipher to header */
+                header_append_tag_u16(header, &header_idx,
+                    HDR_SECONDARY_CIPHER, (uint16_t)CMD.secondary_sign);
+                ALIGN_8(header_idx);
+                /* Add Secondary Pubkey Hash to header */
+                header_append_tag(header, &header_idx, HDR_SECONDARY_PUBKEY, digest_sz, second_buf);
+                DEBUG_PRINT("Secondary pubkey hash %d\n", digest_sz);
+                DEBUG_BUFFER(second_buf, digest_sz);
+            }
+        }
+        if (ret == 0) {
+            printf("Calculating SHA256 digest...\n");
+            ALIGN_8(header_idx);
+            ret = wc_InitSha256_ex(&sha, NULL, INVALID_DEVID);
+        }
+        if (ret == 0) {
+            ALIGN_8(header_idx);
+            /* Hash Header */
+            ret = wc_Sha256Update(&sha, header, header_idx);
+
+            /* Hash image file */
+            f = fopen(image_file, "rb");
+            if (f == NULL) {
+                printf("Open image file %s failed\n", image_file);
+                ret = -1;
+                wc_Sha256Free(&sha);
+                goto failure;
+            }
+            pos = 0;
+            while (ret == 0 && pos < image_sz) {
+                read_sz = image_sz - pos;
+                if (read_sz > 32)
+                    read_sz = 32;
+                io_sz = (int)fread(buf, 1, read_sz, f);
+                if (io_sz != (int)read_sz) {
+                    ret = -1;
+                    break;
+                }
+                ret = wc_Sha256Update(&sha, buf, read_sz);
+                pos += read_sz;
+            }
+            fclose(f);
+            f = NULL;
+            if (ret == 0) {
+                wc_Sha256Final(&sha, digest);
+                digest_sz = HDR_SHA256_LEN;
+            }
+            wc_Sha256Free(&sha);
+        }
+    #endif
+    }
+    else if (CMD.hash_algo == HASH_SHA384)
+    {
+    #ifndef NO_SHA384
+        wc_Sha384 sha;
+        digest_sz = SHA384_DIGEST_SIZE;
+        ALIGN_8(header_idx);
+        printf("Calculating SHA384 digest...\n");
+        /* pubkey hash calculation */
+        ret = wc_InitSha384_ex(&sha, NULL, INVALID_DEVID);
+        if (ret == 0) {
+            ret = wc_Sha384Update(&sha, pubkey, pubkey_sz);
+            if (ret == 0) {
+                wc_Sha384Final(&sha, buf);
+                /* Add Pubkey Hash to header */
+                ALIGN_8(header_idx);
+                header_append_tag(header, &header_idx, HDR_PUBKEY, digest_sz, buf);
+                DEBUG_PRINT("Pubkey hash %d\n", digest_sz);
+                DEBUG_BUFFER(buf, digest_sz);
+                ALIGN_8(header_idx);
+            }
+            wc_Sha384Free(&sha);
+        }
+        if (ret == 0 && CMD.hybrid && secondary_key_sz > 0) {
+            ret = wc_InitSha384_ex(&sha, NULL, INVALID_DEVID);
+            if (ret == 0) {
+                ret = wc_Sha384Update(&sha, secondary_key, secondary_key_sz);
+                if (ret == 0) {
+                    wc_Sha384Final(&sha, second_buf);
+                    /* Add Secondary cipher to header */
+                    header_append_tag_u16(header, &header_idx,
+                        HDR_SECONDARY_CIPHER, (uint16_t)CMD.secondary_sign);
+                    /* Add Secondary Pubkey Hash to header */
+                    header_append_tag(header, &header_idx, HDR_SECONDARY_PUBKEY, digest_sz, second_buf);
+                    DEBUG_PRINT("Secondary pubkey hash %d\n", digest_sz);
+                    DEBUG_BUFFER(second_buf, digest_sz);
+                    ALIGN_8(header_idx);
+                }
+                wc_Sha384Free(&sha);
+            }
+        }
+        if (ret == 0)
+            ret = wc_InitSha384_ex(&sha, NULL, INVALID_DEVID);
+        if (ret == 0) {
+            /* Hash Header */
+            ret = wc_Sha384Update(&sha, header, header_idx);
+
+            /* Hash image file */
+            f = fopen(image_file, "rb");
+            if (f == NULL) {
+                printf("Open image file %s failed\n", image_file);
+                ret = -1;
+                wc_Sha384Free(&sha);
+                goto failure;
+            }
+            pos = 0;
+            while (ret == 0 && pos < image_sz) {
+                read_sz = image_sz - pos;
+                if (read_sz > 32)
+                    read_sz = 32;
+                io_sz = (int)fread(buf, 1, read_sz, f);
+                if (io_sz != (int)read_sz) {
+                    ret = -1;
+                    break;
+                }
+                ret = wc_Sha384Update(&sha, buf, read_sz);
+                pos += read_sz;
+            }
+            fclose(f);
+            f = NULL;
+            if (ret == 0) {
+                wc_Sha384Final(&sha, digest);
+                digest_sz = HDR_SHA384_LEN;
+            }
+            wc_Sha384Free(&sha);
+        }
+    #endif
+    }
+    else if (CMD.hash_algo == HASH_SHA3)
+    {
+    #ifdef WOLFSSL_SHA3
+        wc_Sha3 sha;
+        digest_sz = HDR_SHA3_384_LEN;
+        ret = wc_InitSha3_384(&sha, NULL, INVALID_DEVID);
+        if (ret == 0) {
+            ret = wc_Sha3_384_Update(&sha, pubkey, pubkey_sz);
+            if (ret == 0) {
+                ret = wc_Sha3_384_Final(&sha, buf);
+                header_append_tag(header, &header_idx, HDR_PUBKEY, digest_sz, buf);
+                DEBUG_PRINT("Pubkey hash %d\n", digest_sz);
+                DEBUG_BUFFER(buf, digest_sz);
+            ALIGN_8(header_idx);
+            }
+            wc_Sha3_384_Free(&sha);
+        }
+        if (ret == 0 && CMD.hybrid && secondary_key_sz > 0) {
+            ALIGN_8(header_idx);
+            ret = wc_InitSha3_384(&sha, NULL, INVALID_DEVID);
+            if (ret == 0) {
+                ret = wc_Sha3_384_Update(&sha, secondary_key, secondary_key_sz);
+                if (ret == 0) {
+                    ret = wc_Sha3_384_Final(&sha, second_buf);
+                    /* Add Secondary cipher to header */
+                    header_append_tag_u16(header, &header_idx,
+                        HDR_SECONDARY_CIPHER, (uint16_t)CMD.secondary_sign);
+                    header_append_tag(header, &header_idx, HDR_SECONDARY_PUBKEY, digest_sz, second_buf);
+                    DEBUG_PRINT("Secondary pubkey hash %d\n", digest_sz);
+                    DEBUG_BUFFER(second_buf, digest_sz);
+                    ALIGN_8(header_idx);
+                }
+                wc_Sha3_384_Free(&sha);
+            }
+        }
+        if (ret == 0) {
+            printf("Calculating SHA3 digest...\n");
+            ALIGN_8(header_idx);
+            ret = wc_InitSha3_384(&sha, NULL, INVALID_DEVID);
+        }
+        if (ret == 0) {
+            /* Hash Header */
+            ret = wc_Sha3_384_Update(&sha, header, header_idx);
+
+            /* Hash image file */
+            f = fopen(image_file, "rb");
+            if (f == NULL) {
+                printf("Open image file %s failed\n", image_file);
+                ret = -1;
+                wc_Sha3_384_Free(&sha);
+                goto failure;
+            }
+            pos = 0;
+            while (ret == 0 && pos < image_sz) {
+                read_sz = image_sz - pos;
+                if (read_sz > 128)
+                    read_sz = 128;
+                io_sz = (int)fread(buf, 1, read_sz, f);
+                if (io_sz != (int)read_sz) {
+                    ret = -1;
+                    break;
+                }
+                ret = wc_Sha3_384_Update(&sha, buf, read_sz);
+                pos += read_sz;
+            }
+            fclose(f);
+            f = NULL;
+            if (ret == 0) {
+                ret = wc_Sha3_384_Final(&sha, digest);
+                digest_sz = HDR_SHA3_384_LEN;
+            }
+            wc_Sha3_384_Free(&sha);
+        }
+
+    #endif
+    }
+    if (digest_sz == 0) {
+        printf("Hash algorithm error %d\n", ret);
+        goto failure;
+    }
+    DEBUG_PRINT("Image hash %d\n", digest_sz);
+    DEBUG_BUFFER(digest, digest_sz);
+
+    /* Add image hash to header */
+    header_append_tag(header, &header_idx, CMD.hash_algo, digest_sz, digest);
+    if (CMD.sign != NO_SIGN) {
+        /* If hash only, then save digest and exit */
+        if (CMD.sha_only) {
+            f = fopen(outfile, "wb");
+            if (f == NULL) {
+                printf("Open output file %s failed\n", outfile);
+                goto failure;
+            }
+            fwrite(digest, 1, digest_sz, f);
+            fclose(f);
+            printf("Digest image %s successfully created.\n", outfile);
+            exit(0);
+        }
+        /* save max sig size */
+        CMD.policy_sz = CMD.signature_sz;
+
+        /* Signing Image */
+        signature = malloc(CMD.signature_sz);
+        if (signature == NULL) {
+            printf("Signature malloc error!\n");
+            goto failure;
+        }
+
+        memset(signature, 0, CMD.signature_sz);
+        DEBUG_PRINT("Signature sz (malloc): %d\n", CMD.signature_sz);
+        if (!CMD.manual_sign) {
+            printf("Signing the digest...\n");
+            DEBUG_PRINT("Digest %d\n", digest_sz);
+            DEBUG_BUFFER(digest, digest_sz);
+            /* Sign the digest */
+            ret = sign_digest(CMD.sign, CMD.hash_algo,
+                signature, &CMD.signature_sz, digest, digest_sz, 0);
+            if (ret != 0) {
+                printf("Signing error %d\n", ret);
+                goto failure;
+            }
+        }
+        else {
+            DEBUG_PRINT("Opening signature file %s\n", CMD.signature_file);
+
+            f = fopen(CMD.signature_file, "rb");
+            if (f == NULL) {
+                printf("Open signature file %s failed\n", CMD.signature_file);
+                goto failure;
+            }
+            io_sz = (int)fread(signature, 1, CMD.signature_sz, f);
+            fclose(f);
+            f = NULL;
+            if (io_sz <= 0) {
+                printf("Error reading file %s\n", CMD.signature_file);
+                goto failure;
+            }
+            CMD.signature_sz = io_sz;
+        }
+
+        if (CMD.hybrid) {
+            /* Sign the digest again with the secondary key */
+            secondary_signature = malloc(CMD.secondary_signature_sz);
+            if (secondary_signature == NULL) {
+                printf("Secondary Signature malloc error!\n");
+                goto failure;
+            }
+            memset(secondary_signature, 0, CMD.secondary_signature_sz);
+            ret = sign_digest(CMD.secondary_sign, CMD.hash_algo,
+                secondary_signature, &CMD.secondary_signature_sz, digest, digest_sz, 1);
+            if (ret != 0) {
+                printf("Secondary Signing error %d\n", ret);
+                goto failure;
+            }
+        }
+
+        /* Signing Policy */
+        if (CMD.policy_sign) {
+            /* Policy is always SHA2-256 */
+            digest_sz = HDR_SHA256_LEN;
+
+            policy = malloc(CMD.policy_sz + sizeof(uint32_t));
+            if (policy == NULL) {
+                printf("Policy Signature malloc error!\n");
+                goto failure;
+            }
+            memset(policy, 0, CMD.policy_sz);
+
+            /* open policy file */
+            printf("Opening policy file %s\n", CMD.policy_file);
+            f = fopen(CMD.policy_file, "rb");
+            if (f == NULL) {
+                printf("Open policy digest file %s failed\n", CMD.policy_file);
+                goto failure;
+            }
+            /* policy file starts with 4 byte PCR mask */
+            io_sz = (int)fread(policy, 1, sizeof(uint32_t), f);
+            if (io_sz != sizeof(uint32_t)) {
+                printf("Error reading file %s\n", CMD.policy_file);
+                fclose(f);
+                f = NULL;
+                goto failure;
+            }
+
+            if (!CMD.manual_sign) {
+                /* in normal sign mode PCR digest (32 bytes) */
+                io_sz = (int)fread(digest, 1, digest_sz, f);
+                fclose(f);
+                f = NULL;
+                if (io_sz != (int)digest_sz) {
+                    printf("Error reading file %s\n", CMD.policy_file);
+                    goto failure;
+                }
+
+                printf("Signing the policy digest...\n");
+                DEBUG_PRINT("Policy Digest %d\n", digest_sz);
+                DEBUG_BUFFER(digest, digest_sz);
+
+                /* Policy is always SHA2-256 */
+                ret = sign_digest(CMD.sign, HASH_SHA256,
+                    policy + sizeof(uint32_t), &CMD.policy_sz,
+                    digest, digest_sz, 0);
+                if (ret != 0) {
+                    printf("Signing policy error %d\n", ret);
+                    goto failure;
+                }
+            }
+            else {
+                /* in manual mode remainder is PCR signature */
+                io_sz = (int)fread(policy, 1, CMD.policy_sz, f);
+                fclose(f);
+                f = NULL;
+                if (io_sz <= 0) {
+                    printf("Error reading file %s\n", CMD.policy_file);
+                    goto failure;
+                }
+                CMD.policy_sz = io_sz;
+            }
+
+            /* save copy of signed policy including 4 byte header to file */
+            snprintf((char*)buf, sizeof(buf), "%s.sig", CMD.policy_file);
+            printf("Saving policy signature to %s\n", (char*)buf);
+            f = fopen((char*)buf, "w+b");
+            if (f != NULL) {
+                fwrite(policy, 1, CMD.policy_sz + sizeof(uint32_t), f);
+                fclose(f);
+                f = NULL;
+            }
+        }
+
+        DEBUG_PRINT("Signature %d\n", CMD.signature_sz);
+        DEBUG_BUFFER(signature, CMD.signature_sz);
+        if (CMD.policy_sign) {
+            DEBUG_PRINT("PCR Mask 0x%08x\n", *((uint32_t*)policy));
+            DEBUG_PRINT("Policy Signature %d\n", CMD.policy_sz);
+            DEBUG_BUFFER(policy + sizeof(uint32_t), CMD.policy_sz);
+        }
+
+        if (CMD.signature_sz > (uint32_t)UINT16_MAX) {
+            printf("Error: Signature too large for TLV encoding (%u > %u)\n",
+                CMD.signature_sz, (unsigned int)UINT16_MAX);
+            ret = -1;
+            goto failure;
+        }
+
+        if (CMD.hybrid &&
+            CMD.secondary_signature_sz > (uint32_t)UINT16_MAX) {
+            printf("Error: Secondary signature too large for TLV encoding "
+                "(%u > %u)\n",
+                CMD.secondary_signature_sz, (unsigned int)UINT16_MAX);
+            ret = -1;
+            goto failure;
+        }
+
+        /* Add signature to header */
+        ALIGN_8(header_idx);
+        header_append_tag(header, &header_idx, HDR_SIGNATURE, CMD.signature_sz,
+                signature);
+
+        if (CMD.hybrid) {
+            /* Add secondary signature to header */
+            ALIGN_8(header_idx);
+            header_append_tag(header, &header_idx, HDR_SECONDARY_SIGNATURE,
+                    CMD.secondary_signature_sz, secondary_signature);
+        }
+
+        if (CMD.policy_sign) {
+            ALIGN_8(header_idx);
+            /* Add policy signature to header */
+            header_append_tag(header, &header_idx, HDR_POLICY_SIGNATURE,
+                CMD.policy_sz + (uint16_t)sizeof(uint32_t), policy);
+        }
+    } /* end if(sign != NO_SIGN) */
+
+    test_last_header_idx = header_idx;
+
+    /* Add padded header at end */
+    while (header_idx < CMD.header_sz) {
+        header[header_idx++] = 0xFF;
+    }
+
+    /* Check if signed image fits in partition */
+    {
+        const char *psize_name = "WOLFBOOT_PARTITION_SIZE";
+        const char *env_psize = getenv("WOLFBOOT_PARTITION_SIZE");
+        const char *env_ssize = getenv("WOLFBOOT_SECTOR_SIZE");
+        if (CMD.self_update) {
+            /* self-update images are staged in the UPDATE partition, which
+             * may be larger than BOOT (monolithic self-update) */
+            const char *env_usize = getenv("WOLFBOOT_PARTITION_UPDATE_SIZE");
+            if (env_usize && *env_usize) {
+                env_psize = env_usize;
+                psize_name = "WOLFBOOT_PARTITION_UPDATE_SIZE";
+            }
+        }
+        if (env_psize && *env_psize) {
+            char *endptr;
+            unsigned long tmp;
+            uint32_t partition_sz, sector_sz = 0;
+            const char *env_nvm_wo = getenv("NVM_FLASH_WRITEONCE");
+            int nvm_writeonce = (env_nvm_wo && *env_nvm_wo &&
+                strcmp(env_nvm_wo, "1") == 0);
+
+            errno = 0;
+            tmp = strtoul(env_psize, &endptr, 0);
+            if (endptr == env_psize || *endptr != '\0' ||
+                    errno == ERANGE || tmp == 0 || tmp > UINT32_MAX) {
+                printf("Error: Invalid %s '%s'\n", psize_name, env_psize);
+                ret = -1;
+                goto failure;
+            }
+            partition_sz = (uint32_t)tmp;
+
+            if (env_ssize && *env_ssize) {
+                errno = 0;
+                tmp = strtoul(env_ssize, &endptr, 0);
+                if (endptr == env_ssize || *endptr != '\0' ||
+                        errno == ERANGE || tmp == 0 || tmp > UINT32_MAX) {
+                    printf("Error: Invalid WOLFBOOT_SECTOR_SIZE '%s'\n",
+                        env_ssize);
+                    ret = -1;
+                    goto failure;
+                }
+                sector_sz = (uint32_t)tmp;
+            }
+
+            {
+                uint32_t total_img_sz = CMD.header_sz + image_sz;
+                /* Only subtract sector for trailer when sector < partition.
+                 * When sector >= partition (e.g. update_ram targets), the
+                 * entire partition is available for the image.
+                 * NVM_FLASH_WRITEONCE reserves 2 sectors (active + redundant).
+                 */
+                uint32_t trailer_sz = sector_sz;
+                uint32_t max_img_sz;
+                if (nvm_writeonce && sector_sz < partition_sz)
+                    trailer_sz = 2 * sector_sz;
+                max_img_sz = (sector_sz < partition_sz) ?
+                    (partition_sz - trailer_sz) : partition_sz;
+                if (total_img_sz > max_img_sz) {
+                    if (sector_sz < partition_sz) {
+                        printf("Error: Image size %u (header %u + firmware %u) "
+                            "exceeds max %u (%s %u - %d x sector %u)\n",
+                            total_img_sz, CMD.header_sz, image_sz,
+                            max_img_sz, psize_name, partition_sz,
+                            nvm_writeonce ? 2 : 1,
+                            sector_sz);
+                    } else {
+                        printf("Error: Image size %u (header %u + firmware %u) "
+                            "exceeds max %u (%s %u)\n",
+                            total_img_sz, CMD.header_sz, image_sz,
+                            max_img_sz, psize_name, partition_sz);
+                    }
+                    ret = -1;
+                    goto failure;
+                }
+            }
+        }
+    }
+
+    /* Create output image */
+    f = fopen(outfile, "w+b");
+    if (f == NULL) {
+        printf("Open output image file %s failed\n", outfile);
+        goto failure;
+    }
+    fwrite(header, 1, header_idx, f);
+    /* Copy image to output */
+    if (!CMD.header_only) {
+        f2  = fopen(image_file, "rb");
+        pos = 0;
+        while (pos < image_sz) {
+            read_sz = image_sz;
+            if (read_sz > sizeof(buf)) {
+                read_sz = sizeof(buf);
+            }
+            read_sz = (uint32_t)fread(buf, 1, read_sz, f2);
+            if ((read_sz == 0) && (feof(f2))) {
+                break;
+            }
+            fwrite(buf, 1, read_sz, f);
+            pos += read_sz;
+        }
+        fclose(f2);
+        f2 = NULL;
+    }
+
+    if (!CMD.header_only && (CMD.encrypt != ENC_OFF) && CMD.encrypt_key_file) {
+        uint8_t enc_buf[ENC_MAX_BLOCK_SZ];
+        int ivSz, keySz, encBlockSz;
+        uint32_t fsize = 0;
+        switch (CMD.encrypt) {
+            case ENC_CHACHA:
+                ivSz = ENCRYPT_NONCE_SIZE_CHACHA;
+                keySz = ENCRYPT_KEY_SIZE_CHACHA;
+                encBlockSz = ENCRYPT_BLOCK_SIZE_CHACHA;
+                break;
+            case ENC_AES128:
+                ivSz = ENCRYPT_NONCE_SIZE_AES;
+                keySz = ENCRYPT_KEY_SIZE_AES128;
+                encBlockSz = ENCRYPT_BLOCK_SIZE_AES;
+                break;
+            case ENC_AES256:
+                ivSz = ENCRYPT_NONCE_SIZE_AES;
+                keySz = ENCRYPT_KEY_SIZE_AES256;
+                encBlockSz = ENCRYPT_BLOCK_SIZE_AES;
+                break;
+            default:
+                printf("No valid encryption mode selected\n");
+                goto failure;
+
+        }
+        fek = fopen(CMD.encrypt_key_file, "rb");
+        if (fek == NULL) {
+            fprintf(stderr, "Open encryption key file %s: %s\n",
+                    CMD.encrypt_key_file, strerror(errno));
+            goto failure;
+        }
+        /* Unbuffered: keep no libc-owned copy of the key/IV bytes. */
+        setvbuf(fek, NULL, _IONBF, 0);
+        ret = (int)fread(key, 1, keySz, fek);
+        if (ret != keySz) {
+            fprintf(stderr, "Error reading key from %s\n", CMD.encrypt_key_file);
+            ret = -1;
+            goto failure;
+        }
+        ret = (int)fread(iv, 1, ivSz, fek);
+        if (ret != ivSz) {
+            fprintf(stderr, "Error reading IV from %s\n", CMD.encrypt_key_file);
+            ret = -1;
+            goto failure;
+        }
+        fclose(fek);
+        fek = NULL;
+
+        fef = fopen(CMD.output_encrypted_image_file, "wb");
+        if (!fef) {
+            fprintf(stderr, "Open encrypted output file %s: %s\n",
+                    CMD.output_encrypted_image_file, strerror(errno));
+            goto failure;
+        }
+        fsize = ftell(f);
+        fseek(f, 0, SEEK_SET); /* restart the _signed file from 0 */
+
+        printf("Encrypting %u bytes...\n", fsize);
+
+        if (CMD.encrypt == ENC_CHACHA) {
+            ChaCha cha;
+#ifndef HAVE_CHACHA
+            fprintf(stderr, "Encryption not supported: chacha support not found"
+                   "in wolfssl configuration.\n");
+            ret = 100;
+            goto failure;
+#endif
+            wc_Chacha_SetKey(&cha, key, sizeof(key));
+            wc_Chacha_SetIV(&cha, iv, 0);
+            for (pos = 0; pos < fsize; pos += encBlockSz) {
+                int fread_retval;
+                fread_retval = (int)fread(buf, 1, encBlockSz, f);
+                if ((fread_retval == 0) && feof(f)) {
+                    break;
+                }
+                wc_Chacha_Process(&cha, enc_buf, buf, fread_retval);
+                fwrite(enc_buf, 1, fread_retval, fef);
+            }
+        } else if ((CMD.encrypt == ENC_AES128) || (CMD.encrypt == ENC_AES256)) {
+            Aes aes_e;
+            wc_AesInit(&aes_e, NULL, 0);
+            wc_AesSetKeyDirect(&aes_e, key, keySz, iv, AES_ENCRYPTION);
+            for (pos = 0; pos < fsize; pos += encBlockSz) {
+                int fread_retval;
+                fread_retval = (int)fread(buf, 1, encBlockSz, f);
+                if ((fread_retval == 0) && feof(f)) {
+                    break;
+                }
+                /* Pad with FF if input is too short */
+                while((fread_retval % encBlockSz) != 0) {
+                    buf[fread_retval++] = 0xFF;
+                }
+                wc_AesCtrEncrypt(&aes_e, enc_buf, buf, fread_retval);
+                fwrite(enc_buf, 1, fread_retval, fef);
+            }
+        }
+        fclose(fef);
+        fef = NULL;
+        printf("Encryption complete.\n");
+    }
+    printf("Output image(s) successfully created.\n");
+    ret = 0;
+    if (f2) {
+        fclose(f2);
+        f2 = NULL;
+    }
+    if (f) {
+        fclose(f);
+        f = NULL;
+    }
+failure:
+    wc_ForceZero(key, sizeof(key));
+    wc_ForceZero(iv, sizeof(iv));
+    if (f)
+        fclose(f);
+    if (f2)
+        fclose(f2);
+    if (fek)
+        fclose(fek);
+    if (fef)
+        fclose(fef);
+    if (cert_chain)
+        free(cert_chain);
+    if (policy)
+        free(policy);
+    if (header)
+        free(header);
+    if (signature)
+        free(signature);
+    if (secondary_signature)
+        free(secondary_signature);
+    return ret;
+}
+
+static int make_header(uint8_t *pubkey, uint32_t pubkey_sz,
+        const char *image_file, const char *outfile)
+{
+    return make_header_ex(0, pubkey, pubkey_sz, image_file, outfile, 0, 0, 0, 0,
+            NULL, 0, NULL, 0);
+}
+
+static int make_header_delta(uint8_t *pubkey, uint32_t pubkey_sz,
+        const char *image_file, const char *outfile,
+        uint32_t delta_base_version, uint32_t patch_len,
+        uint32_t patch_inv_off, uint32_t patch_inv_len,
+        uint8_t *base_hash, uint32_t base_hash_sz)
+{
+    return make_header_ex(1, pubkey, pubkey_sz, image_file, outfile,
+            delta_base_version, patch_len,
+            patch_inv_off, patch_inv_len,
+            NULL, 0, base_hash, base_hash_sz);
+}
+
+static int make_hybrid_header(uint8_t *pubkey, uint32_t pubkey_sz,
+        const char *image_file, const char *outfile,
+        const uint8_t *secondary_key, uint32_t secondary_key_sz)
+{
+    return make_header_ex(0, pubkey, pubkey_sz, image_file, outfile, 0, 0, 0, 0,
+            secondary_key, secondary_key_sz, NULL, 0);
+}
+
+static int base_diff(const char *f_base, uint8_t *pubkey, uint32_t pubkey_sz, int padding)
+{
+#if HAVE_MMAP
+    int fd1 = -1, fd2 = -1, fd3 = -1;
+#else
+    FILE *f1 = NULL, *f2 = NULL, *f3 = NULL;
+#endif
+    int len1 = 0, len2 = 0, len3 = 0;
+    struct stat st;
+    void *base = NULL;
+    void *buffer = NULL;
+    uint8_t *dest = NULL;
+    uint8_t ff = 0xff;
+    int r;
+    uint32_t patch_sz, patch_inv_sz;
+    uint32_t patch_inv_off;
+    uint8_t *delta_base_version = NULL;
+    uint32_t delta_base_version_val = 0;
+    uint16_t delta_base_version_sz = 0;
+    WB_DIFF_CTX diff_ctx;
+    int ret = -1;
+    int io_sz;
+    uint8_t *base_hash = NULL;
+    uint16_t base_hash_sz = 0;
+    uint32_t wolfboot_sector_size = 0;
+    uint32_t blksz;
+
+    wolfboot_sector_size = wb_diff_get_sector_size();
+    printf("delta update: WOLFBOOT_SECTOR_SIZE: %u\n", wolfboot_sector_size);
+    blksz = wolfboot_sector_size;
+    dest = malloc(wolfboot_sector_size);
+    if (!dest) {
+        printf("Error allocating memory to prepare patch sectors\n");
+        goto cleanup;
+    }
+
+    /* Get source file size */
+    if (stat(f_base, &st) < 0) {
+        printf("Cannot stat %s\n", f_base);
+        goto cleanup;
+    }
+    len1 = st.st_size;
+
+    if (len1 > MAX_SRC_SIZE) {
+        printf("%s: file too large\n", f_base);
+        goto cleanup;
+    }
+
+#if HAVE_MMAP
+    /* Open base image */
+    fd1 = open(f_base, O_RDWR);
+    if (fd1 < 0) {
+        printf("Cannot open file %s\n", f_base);
+        goto cleanup;
+    }
+    base = mmap(NULL, len1, PROT_READ|PROT_WRITE, MAP_SHARED, fd1, 0);
+    if (base == (void *)(-1)) {
+        perror("mmap");
+        goto cleanup;
+    }
+#else
+    f1 = fopen(f_base, "rb");
+    if (f1 == NULL) {
+        printf("Cannot open file %s\n", f_base);
+        goto cleanup;
+    }
+    base = malloc(len1);
+    if (base == NULL) {
+        fprintf(stderr, "Error malloc for base %d\n", len1);
+        goto cleanup;
+    }
+    if ((int)fread(base, 1, len1, f1) != len1) {
+        perror("read of base");
+        goto cleanup;
+    }
+#endif
+
+    /* Check base image version */
+    delta_base_version_sz = sign_tool_find_header((uint8_t *)base + 8, HDR_VERSION, &delta_base_version);
+    if (delta_base_version_sz != sizeof(uint32_t)) {
+        printf("Could not read firmware version from base file %s\n", f_base);
+        goto cleanup;
+    }
+    delta_base_version_val = (uint32_t)delta_base_version[0] |
+        ((uint32_t)delta_base_version[1] << 8) |
+        ((uint32_t)delta_base_version[2] << 16) |
+        ((uint32_t)delta_base_version[3] << 24);
+    if (delta_base_version_val == 0) {
+        printf("Could not read firmware version from base file %s\n", f_base);
+        goto cleanup;
+    } else {
+        printf("Delta base version: %u\n", delta_base_version_val);
+    }
+
+    /* Retrieve the hash digest of the base image */
+    if (CMD.hash_algo == HASH_SHA256)
+        base_hash_sz = sign_tool_find_header((uint8_t*)base + 8, HDR_SHA256, &base_hash);
+    else if (CMD.hash_algo == HASH_SHA384)
+        base_hash_sz = sign_tool_find_header((uint8_t*)base + 8, HDR_SHA384, &base_hash);
+    else if (CMD.hash_algo == HASH_SHA3)
+        base_hash_sz = sign_tool_find_header((uint8_t*)base + 8, HDR_SHA3_384, &base_hash);
+
+#if HAVE_MMAP
+    /* Open second image file */
+    fd2 = open(CMD.output_image_file, O_RDONLY);
+    if (fd2 < 0) {
+        printf("Cannot open file %s\n", CMD.output_image_file);
+        goto cleanup;
+    }
+    /* Get second file size */
+    if (stat(CMD.output_image_file, &st) < 0) {
+        printf("Cannot stat %s\n", CMD.output_image_file);
+        goto cleanup;
+    }
+    len2 = st.st_size;
+    if (len2 > MAX_SRC_SIZE) {
+        printf("%s: file too large\n", CMD.output_image_file);
+        goto cleanup;
+    }
+    buffer = mmap(NULL, len2, PROT_READ, MAP_SHARED, fd2, 0);
+    if (buffer == (void *)(-1)) {
+        perror("mmap");
+        goto cleanup;
+    }
+
+    /* Open output file */
+    fd3 = open(wolfboot_delta_file, O_RDWR|O_CREAT|O_TRUNC, 0660);
+    if (fd3 < 0) {
+        printf("Cannot open file %s for writing\n", wolfboot_delta_file);
+        goto cleanup;
+    }
+    if (len2 <= 0) {
+        printf("Invalid file size: %d\n", len2);
+        goto cleanup;
+    }
+    lseek(fd3, MAX_SRC_SIZE -1, SEEK_SET);
+    io_sz = write(fd3, &ff, 1);
+    if (io_sz != 1) {
+        printf("Could not write to output file: %s\n", strerror(errno));
+        goto cleanup;
+    }
+    lseek(fd3, 0, SEEK_SET);
+    len3 = 0;
+#else
+    /* Open second image file */
+    f2 = fopen(CMD.output_image_file, "rb");
+    if (f2 == NULL) {
+        printf("Cannot open file %s\n", CMD.output_image_file);
+        goto cleanup;
+    }
+    /* Get second file size */
+    fseek(f2, 0L, SEEK_END);
+    len2 = ftell(f2);
+    fseek(f2, 0L, SEEK_SET);
+    if (len2 > MAX_SRC_SIZE) {
+        printf("%s: file too large\n", CMD.output_image_file);
+        goto cleanup;
+    }
+    buffer = malloc(len2);
+    if (buffer == NULL) {
+        fprintf(stderr, "Error malloc for buffer %d\n", len2);
+        goto cleanup;
+    }
+    if ((int)fread(buffer, 1, len2, f2) != len2) {
+        perror("fread of buffer");
+        goto cleanup;
+    }
+    /* Open output file */
+    f3 = fopen(wolfboot_delta_file, "wb");
+    if (f3 == NULL) {
+        printf("Cannot open file %s for writing\n", wolfboot_delta_file);
+        goto cleanup;
+    }
+    if (len2 <= 0) {
+        goto cleanup;
+    }
+    fseek(f3, MAX_SRC_SIZE -1, SEEK_SET);
+    io_sz = (int)fwrite(&ff, 1, 1, f3);
+    if (io_sz != 1) {
+        goto cleanup;
+    }
+    fseek(f3, 0, SEEK_SET);
+    len3 = 0;
+#endif
+
+    /* Direct base->second patch */
+    if (wb_diff_init(&diff_ctx, base, len1, buffer, len2) < 0) {
+        goto cleanup;
+    }
+    do {
+        r = wb_diff(&diff_ctx, dest, blksz);
+        if (r < 0)
+            goto cleanup;
+#if HAVE_MMAP
+        io_sz = write(fd3, dest, r);
+#else
+        io_sz = (int)fwrite(dest, 1, r, f3);
+#endif
+        if (io_sz != r) {
+            goto cleanup;
+        }
+        len3 += r;
+    } while (r > 0);
+    patch_sz = len3;
+    while ((len3 % padding) != 0) {
+        uint8_t zero = 0;
+#if HAVE_MMAP
+        io_sz = write(fd3, &zero, 1);
+#else
+        io_sz = (int)fwrite(&zero, 1, 1, f3);
+#endif
+        if (io_sz != 1) {
+            goto cleanup;
+        }
+        len3++;
+    }
+    /* make_header_delta() below calls make_header_ex(is_diff=1), which may grow
+     * CMD.header_sz to fit the delta TLVs, custom TLVs and certificate chain.
+     * Resolve that expansion here, using the same logic, so patch_inv_off
+     * reflects the header size actually written; otherwise HDR_IMG_DELTA_INVERSE
+     * would encode a stale, too-small offset and break inverse-patch rollback. */
+    if ((CMD.cert_chain_file != NULL) || (CMD.custom_tlvs > 0)) {
+        uint32_t cert_chain_sz = 0;
+        uint32_t required_space;
+        if (CMD.cert_chain_file != NULL) {
+            struct stat cc_stat;
+            if ((stat(CMD.cert_chain_file, &cc_stat) == 0) &&
+                (cc_stat.st_size >= 0)) {
+                if ((uintmax_t)cc_stat.st_size > (uintmax_t)MAX_TLV_LEN) {
+                    printf("Error: Certificate chain too large for TLV encoding "
+                        "(%" PRIuMAX " > %u)\n", (uintmax_t)cc_stat.st_size, MAX_TLV_LEN);
+                    goto cleanup;
+                }
+                cert_chain_sz = (uint32_t)cc_stat.st_size;
+            }
+        }
+        required_space = header_required_size(1, cert_chain_sz, 0);
+        if (CMD.header_sz < required_space) {
+            uint32_t new_size = 256;
+            while (new_size < required_space) {
+                if (new_size > (UINT32_MAX / 2U)) {
+                    printf("Error: Header size overflow while sizing "
+                        "manifest header\n");
+                    goto cleanup;
+                }
+                new_size *= 2;
+            }
+            fprintf(stderr, "Warning: increasing header size from %u to %u "
+                "bytes to fit manifest header fields.\n"
+                "Warning: wolfBoot must be built with IMAGE_HEADER_SIZE=%u "
+                "or it will not find the firmware image.\n",
+                CMD.header_sz, new_size, new_size);
+            CMD.header_sz = new_size;
+        }
+    }
+    patch_inv_off = (uint32_t)len3 + CMD.header_sz;
+    patch_inv_sz = 0;
+
+    /* Inverse second->base patch */
+    if (wb_diff_init(&diff_ctx, buffer, len2, base, len1) < 0) {
+        goto cleanup;
+    }
+    do {
+        r = wb_diff(&diff_ctx, dest, blksz);
+        if (r < 0)
+            goto cleanup;
+#if HAVE_MMAP
+        io_sz = write(fd3, dest, r);
+#else
+        io_sz = (int)fwrite(dest, 1, r, f3);
+#endif
+        if (io_sz != r) {
+            goto cleanup;
+        }
+        patch_inv_sz += r;
+        len3 += r;
+    } while (r > 0);
+#if HAVE_MMAP
+    if (fd3 >= 0) {
+        if (len3 > 0) {
+            ret = ftruncate(fd3, len3);
+        }
+        close(fd3);
+        fd3 = -1;
+    }
+#else
+    if (f3 != NULL) {
+        if (len3 > 0) {
+            ret = fp_truncate(f3, len3);
+        }
+        fclose(f3);
+        f3 = NULL;
+    }
+#endif
+
+
+    if (ret != 0) {
+        goto cleanup;
+    }
+    printf("Successfully created output file %s\n", wolfboot_delta_file);
+    /* Create delta file, with header, from the resulting patch */
+
+    ret = make_header_delta(pubkey, pubkey_sz, wolfboot_delta_file, CMD.output_diff_file,
+            delta_base_version_val, patch_sz, patch_inv_off, patch_inv_sz, base_hash, base_hash_sz);
+
+cleanup:
+    if (dest) {
+        free(dest);
+        dest = NULL;
+    }
+    /* Unlink output file */
+    unlink(wolfboot_delta_file);
+#if HAVE_MMAP
+    /* Cleanup/close */
+    if (fd2 >= 0) {
+        if (len2 > 0) {
+            munmap(buffer, len2);
+        }
+        close(fd2);
+    }
+    if (fd1 >= 0) {
+        if (len1 > 0) {
+            munmap(base, len1);
+        }
+        close(fd1);
+    }
+#else
+    if (f2 != NULL) {
+        if (len2 > 0) {
+            free(buffer);
+        }
+        fclose(f2);
+    }
+    if (f1 != NULL) {
+        if (len1 > 0) {
+            free(base);
+        }
+        fclose(f1);
+    }
+#endif
+    return ret;
+}
+
+uint64_t arg2num(const char *arg, size_t len)
+{
+    uint64_t ret;
+    errno = 0;
+    if (strncmp(arg, "0x", 2) == 0) {
+       ret = strtoull(arg + 2, NULL, 16);
+    } else {
+        ret = strtoull(arg, NULL, 10);
+    }
+    if ((len == 8) && (errno == ERANGE)) {
+        fprintf(stderr, "Custom TLV value out of range: %s\n", arg);
+        exit(16);
+    }
+    switch (len) {
+        case 1:
+            ret &= 0xFF;
+            break;
+        case 2:
+            ret &= 0xFFFF;
+            break;
+        case 4:
+            ret &= 0xFFFFFFFF;
+            break;
+        case 8:
+            break;
+        default:
+            ret = (uint64_t) (-1);
+    }
+    return ret;
+}
+
+/* Load a DER-encoded public key (SubjectPublicKeyInfo), detect the algorithm
+ * and extract the public key in the same format used by the keystore:
+ * X||Y for ECC, raw bytes for Ed25519/Ed448, public key DER for RSA.
+ * On success stores a malloc'd buffer in *out and its size in *out_sz.
+ */
+static int extract_pubkey_from_der(const char *fname, uint8_t **out,
+    uint16_t *out_sz)
+{
+    FILE *f;
+    long fsz;
+    size_t rd;
+    uint8_t *der;
+    uint8_t *buf = NULL;
+    int len = -1;
+    const char *ktype = NULL;
+    word32 idx;
+
+    f = fopen(fname, "rb");
+    if (f == NULL) {
+        fprintf(stderr, "Cannot open public key DER file %s: %s\n",
+            fname, strerror(errno));
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    fsz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if ((fsz <= 0) || (fsz > (long)MAX_TLV_LEN)) {
+        fprintf(stderr, "Invalid public key DER file size %ld: %s\n",
+            fsz, fname);
+        fclose(f);
+        return -1;
+    }
+    der = malloc((size_t)fsz);
+    if (der == NULL) {
+        fprintf(stderr, "Error malloc for public key DER %ld\n", fsz);
+        fclose(f);
+        return -1;
+    }
+    rd = fread(der, 1, (size_t)fsz, f);
+    fclose(f);
+    if (rd != (size_t)fsz) {
+        fprintf(stderr, "Error reading public key DER file %s\n", fname);
+        free(der);
+        return -1;
+    }
+#ifdef HAVE_ECC
+    if (len < 0) {
+        ecc_key ecc;
+        if (wc_ecc_init(&ecc) == 0) {
+            idx = 0;
+            if (wc_EccPublicKeyDecode(der, &idx, &ecc, (word32)fsz) == 0) {
+                uint8_t qx[MAX_ECC_BYTES], qy[MAX_ECC_BYTES];
+                word32 qxsz = sizeof(qx), qysz = sizeof(qy);
+                if (wc_ecc_export_public_raw(&ecc, qx, &qxsz, qy, &qysz)
+                        == 0) {
+                    buf = malloc(qxsz + qysz);
+                    if (buf != NULL) {
+                        memcpy(buf, qx, qxsz);
+                        memcpy(buf + qxsz, qy, qysz);
+                        len = (int)(qxsz + qysz);
+                        ktype = "ECC";
+                    }
+                }
+            }
+            wc_ecc_free(&ecc);
+        }
+    }
+#endif
+#ifdef HAVE_ED25519
+    if (len < 0) {
+        ed25519_key ed;
+        if (wc_ed25519_init(&ed) == 0) {
+            idx = 0;
+            if (wc_Ed25519PublicKeyDecode(der, &idx, &ed, (word32)fsz) == 0) {
+                word32 osz = ED25519_PUB_KEY_SIZE;
+                buf = malloc(osz);
+                if (buf != NULL) {
+                    if (wc_ed25519_export_public(&ed, buf, &osz) == 0) {
+                        len = (int)osz;
+                        ktype = "Ed25519";
+                    } else {
+                        free(buf);
+                        buf = NULL;
+                    }
+                }
+            }
+            wc_ed25519_free(&ed);
+        }
+    }
+#endif
+#ifdef HAVE_ED448
+    if (len < 0) {
+        ed448_key ed4;
+        if (wc_ed448_init(&ed4) == 0) {
+            idx = 0;
+            if (wc_Ed448PublicKeyDecode(der, &idx, &ed4, (word32)fsz) == 0) {
+                word32 osz = ED448_PUB_KEY_SIZE;
+                buf = malloc(osz);
+                if (buf != NULL) {
+                    if (wc_ed448_export_public(&ed4, buf, &osz) == 0) {
+                        len = (int)osz;
+                        ktype = "Ed448";
+                    } else {
+                        free(buf);
+                        buf = NULL;
+                    }
+                }
+            }
+            wc_ed448_free(&ed4);
+        }
+    }
+#endif
+#ifndef NO_RSA
+    if (len < 0) {
+        RsaKey rsa;
+        if (wc_InitRsaKey(&rsa, NULL) == 0) {
+            idx = 0;
+            if (wc_RsaPublicKeyDecode(der, &idx, &rsa, (word32)fsz) == 0) {
+                int dsz = wc_RsaPublicKeyDerSize(&rsa, 1);
+                if (dsz > 0) {
+                    buf = malloc((size_t)dsz);
+                    if (buf != NULL) {
+                        len = wc_RsaKeyToPublicDer(&rsa, buf, (word32)dsz);
+                        if (len > 0) {
+                            ktype = "RSA";
+                        } else {
+                            free(buf);
+                            buf = NULL;
+                            len = -1;
+                        }
+                    }
+                }
+            }
+            wc_FreeRsaKey(&rsa);
+        }
+    }
+#endif
+    free(der);
+    if ((len <= 0) || (buf == NULL)) {
+        fprintf(stderr, "Unable to parse public key DER file %s "
+            "(tried ECC, Ed25519, Ed448, RSA)\n", fname);
+        return -1;
+    }
+    if (len > (int)MAX_TLV_LEN) {
+        fprintf(stderr, "extracted public key too big: %d bytes (max %u): "
+            "%s\n", len, MAX_TLV_LEN, fname);
+        free(buf);
+        return -1;
+    }
+    printf("Custom TLV: imported %s public key from %s (%d bytes)\n",
+        ktype, fname, len);
+    *out = buf;
+    *out_sz = (uint16_t)len;
+    return 0;
+}
+
+static void set_signature_sizes(int secondary)
+{
+    uint32_t *sz = &CMD.signature_sz;
+    int *sign = &CMD.sign;
+    uint32_t suggested_sz = 0;
+    char *env_image_header_size;
+    struct signing_key *k = key_obj(secondary);
+    if (secondary) {
+        sz = &CMD.secondary_signature_sz;
+        sign = &CMD.secondary_sign;
+    }
+    /* get header and signature sizes */
+    if (*sign == SIGN_ED25519) {
+        if (CMD.header_sz < 256)
+            CMD.header_sz = 256;
+        *sz = 64;
+    }
+    else if (*sign == SIGN_ED448) {
+        if (CMD.header_sz < 512)
+            CMD.header_sz = 512;
+        *sz = 114;
+    }
+    else if (*sign == SIGN_ECC256) {
+        if (CMD.header_sz < 256)
+            CMD.header_sz = 256;
+        *sz = 64;
+    }
+    else if (*sign == SIGN_ECC384) {
+        if (CMD.header_sz < 512)
+            CMD.header_sz = 512;
+        *sz = 96;
+    }
+    else if (*sign == SIGN_ECC521) {
+        if (CMD.header_sz < 512)
+            CMD.header_sz = 512;
+        *sz = 132;
+    }
+    else if (*sign == SIGN_RSA2048) {
+        if (CMD.header_sz < 512)
+            CMD.header_sz = 512;
+        *sz = 256;
+    }
+    else if (*sign == SIGN_RSA3072) {
+        if ((CMD.header_sz < 1024) && (CMD.hash_algo != HASH_SHA256))
+            CMD.header_sz = 1024;
+        if (CMD.header_sz < 512)
+            CMD.header_sz = 512;
+        *sz = 384;
+    }
+    else if (*sign == SIGN_RSA4096) {
+        if (CMD.header_sz < 1024)
+            CMD.header_sz = 1024;
+        *sz = 512;
+    }
+    else if (*sign == SIGN_RSAPSS2048) {
+        if (CMD.header_sz < 512)
+            CMD.header_sz = 512;
+        *sz = 256;
+    }
+    else if (*sign == SIGN_RSAPSS3072) {
+        if ((CMD.header_sz < 1024) && (CMD.hash_algo != HASH_SHA256))
+            CMD.header_sz = 1024;
+        if (CMD.header_sz < 512)
+            CMD.header_sz = 512;
+        *sz = 384;
+    }
+    else if (*sign == SIGN_RSAPSS4096) {
+        if (CMD.header_sz < 1024)
+            CMD.header_sz = 1024;
+        *sz = 512;
+    }
+    else if (*sign == SIGN_LMS) {
+        int    lms_ret = 0;
+        word32 sig_sz = 0;
+        char *lms_levels_str, *lms_height_str, *lms_winternitz_str;
+        int lms_levels, lms_height, lms_winternitz;
+        lms_levels_str = getenv("LMS_LEVELS");
+        lms_height_str = getenv("LMS_HEIGHT");
+        lms_winternitz_str = getenv("LMS_WINTERNITZ");
+
+        if (!lms_levels_str)
+            lms_levels = LMS_LEVELS;
+        else
+            lms_levels = atoi(lms_levels_str);
+        if (!lms_height_str)
+            lms_height = LMS_HEIGHT;
+        else
+            lms_height = atoi(lms_height_str);
+        if (!lms_winternitz_str)
+            lms_winternitz = LMS_WINTERNITZ;
+        else
+            lms_winternitz = atoi(lms_winternitz_str);
+
+        lms_ret = wc_LmsKey_Init(&k->lms, NULL, INVALID_DEVID);
+        if (lms_ret != 0) {
+            fprintf(stderr, "error: wc_LmsKey_Init returned %d\n", lms_ret);
+            exit(1);
+        }
+        lms_ret = wc_LmsKey_SetParameters(&k->lms, lms_levels, lms_height,
+                                          lms_winternitz);
+        if (lms_ret != 0) {
+            fprintf(stderr, "error: wc_LmsKey_SetParameters(%d, %d, %d)" \
+                    " returned %d\n", lms_levels, lms_height,
+                    lms_winternitz, lms_ret);
+            exit(1);
+        }
+
+        printf("info: using LMS parameters: L%d-H%d-W%d\n", lms_levels,
+               lms_height, lms_winternitz);
+
+        lms_ret = wc_LmsKey_GetSigLen(&k->lms, &sig_sz);
+        if (lms_ret != 0) {
+            fprintf(stderr, "error: wc_LmsKey_GetSigLen returned %d\n",
+                    lms_ret);
+            exit(1);
+        }
+
+        DEBUG_PRINT("info: LMS signature size: %d\n", sig_sz);
+
+        if (CMD.header_sz < 2 * sig_sz)
+            CMD.header_sz = 2 * sig_sz;
+        *sz = sig_sz;
+    }
+    else if (*sign == SIGN_XMSS) {
+        int    xmss_ret = 0;
+        word32 sig_sz = 0;
+        char *xmss_params = NULL;
+
+        xmss_params = getenv("XMSS_PARAMS");
+        if (!xmss_params)
+            xmss_params = WOLFBOOT_XMSS_PARAMS;
+
+        printf("info: using XMSS parameters: %s\n", xmss_params);
+
+        xmss_ret = wc_XmssKey_Init(&k->xmss, NULL, INVALID_DEVID);
+        if (xmss_ret != 0) {
+            fprintf(stderr, "error: wc_XmssKey_Init returned %d\n", xmss_ret);
+            exit(1);
+        }
+
+        xmss_ret = wc_XmssKey_SetParamStr(&k->xmss, xmss_params);
+        if (xmss_ret != 0) {
+            fprintf(stderr, "error: wc_XmssKey_SetParamStr(%s)" \
+                    " returned %d\n", xmss_params, xmss_ret);
+            exit(1);
+        }
+
+
+        xmss_ret = wc_XmssKey_GetSigLen(&k->xmss, &sig_sz);
+        if (xmss_ret != 0) {
+            fprintf(stderr, "error: wc_XmssKey_GetSigLen returned %d\n",
+                    xmss_ret);
+            exit(1);
+        }
+
+        DEBUG_PRINT("info: XMSS signature size: %d\n", sig_sz);
+
+        if (CMD.header_sz < 2 * sig_sz)
+            CMD.header_sz = 2 * sig_sz;
+        *sz = sig_sz;
+    }
+    else if (*sign == SIGN_ML_DSA) {
+        int ml_dsa_ret = 0;
+        uint32_t sig_sz = 0;
+        char *env_ml_dsa_level = NULL;
+        int ml_dsa_level = ML_DSA_LEVEL;
+        env_ml_dsa_level = getenv("ML_DSA_LEVEL");
+        if (env_ml_dsa_level)
+            ml_dsa_level = atoi(env_ml_dsa_level);
+
+        ml_dsa_ret = wc_MlDsaKey_Init(&k->ml_dsa, NULL, INVALID_DEVID);
+        if (ml_dsa_ret != 0) {
+            fprintf(stderr, "error: wc_MlDsaKey_Init returned %d\n", ml_dsa_ret);
+            exit(1);
+        }
+
+        ml_dsa_ret = wc_MlDsaKey_SetParams(&k->ml_dsa, ml_dsa_level);
+        if (ml_dsa_ret != 0) {
+            fprintf(stderr, "error: wc_MlDsaKey_SetParamStr(%d)" \
+                    " returned %d\n", ml_dsa_level, ml_dsa_ret);
+            exit(1);
+        }
+
+        printf("info: using ML-DSA parameters: %d\n", ml_dsa_level);
+
+        ml_dsa_ret = wc_MlDsaKey_GetSigLen(&k->ml_dsa, (int *)&sig_sz);
+        if (ml_dsa_ret != 0) {
+            fprintf(stderr, "error: wc_MlDsaKey_GetSigLen returned %d\n",
+                    ml_dsa_ret);
+            exit(1);
+        }
+
+        DEBUG_PRINT("info: ML-DSA signature size: %d\n", sig_sz);
+
+        if (CMD.header_sz < 2 * sig_sz)
+            CMD.header_sz = 2 * sig_sz;
+        *sz = sig_sz;
+    }
+
+    env_image_header_size = getenv("IMAGE_HEADER_SIZE");
+    if (env_image_header_size) {
+        suggested_sz = atoi(env_image_header_size);
+    }
+    if (suggested_sz != 0) {
+        if (CMD.header_sz <= suggested_sz)
+            CMD.header_sz = suggested_sz;
+        else
+            printf("Environment variable IMAGE_HEADER_SIZE=%u overridden.\n", suggested_sz);
+    }
+    if ((CMD.header_sz == 256) && (CMD.delta)) {
+        printf("Adjusting header size to fit base image of delta update \n");
+        CMD.header_sz <<= 1;
+    }
+    printf("Manifest header size: %u\n", CMD.header_sz);
+}
+
+int main(int argc, char** argv)
+{
+    int ret = 0;
+    int i;
+    int pos_args;
+    int need;
+    char* tmpstr;
+    const char* sign_str = "AUTO";
+    const char* hash_str = "SHA256";
+    const char* secondary_sign_str = "NONE";
+    uint8_t  buf[PATH_MAX-32]; /* leave room to avoid "directive output may be truncated" */
+    uint8_t *pubkey = NULL;
+    uint32_t pubkey_sz = 0;
+    uint8_t *kbuf=NULL, *key_buffer, *key_buffer2;
+    uint32_t key_buffer_sz, key_buffer_sz2;
+
+#ifdef DEBUG_SIGNTOOL
+    wolfSSL_Debugging_ON();
+#endif
+
+    printf("wolfBoot KeyTools (Compiled C version)\n");
+    printf("wolfBoot version %X\n", WOLFBOOT_VERSION);
+
+    /* Check arguments and print usage */
+    if (argc < 4) {
+        printf("Usage: %s [options] image key version\n", argv[0]);
+        printf("For full usage manual, see 'docs/Signing.md'\n");
+        exit(1);
+    }
+
+    /* Set initial manifest header size to a minimum default value */
+    CMD.header_sz = 256;
+
+    /* Parse Arguments */
+    for (i=1; i<argc; i++) {
+        if (strcmp(argv[i], "--no-sign") == 0) {
+            CMD.sign = NO_SIGN;
+            sign_str = "NONE";
+        } else if (strcmp(argv[i], "--ed25519") == 0) {
+            if (CMD.sign != SIGN_AUTO)  {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_ED25519;
+                secondary_sign_str = "ED25519";
+            } else {
+                CMD.sign = SIGN_ED25519;
+                sign_str = "ED25519";
+            }
+        } else if (strcmp(argv[i], "--ed448") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_ED448;
+                secondary_sign_str = "ED448";
+            } else {
+                CMD.sign = SIGN_ED448;
+                sign_str = "ED448";
+            }
+        }
+        else if (strcmp(argv[i], "--ecc256") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_ECC256;
+                secondary_sign_str = "ECC256";
+            } else {
+                CMD.sign = SIGN_ECC256;
+                sign_str = "ECC256";
+            }
+        }
+        else if (strcmp(argv[i], "--ecc384") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_ECC384;
+                secondary_sign_str = "ECC384";
+            } else {
+                CMD.sign = SIGN_ECC384;
+                sign_str = "ECC384";
+            }
+        }
+        else if (strcmp(argv[i], "--ecc521") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_ECC521;
+                secondary_sign_str = "ECC521";
+            } else {
+                CMD.sign = SIGN_ECC521;
+                sign_str = "ECC521";
+            }
+        }
+        else if (strcmp(argv[i], "--rsa2048enc") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_RSA2048;
+                secondary_sign_str = "RSA2048ENC";
+            } else {
+                CMD.sign = SIGN_RSA2048;
+                sign_str = "RSA2048ENC";
+            }
+            CMD.sign_wenc = 1;
+        }
+        else if (strcmp(argv[i], "--rsa2048") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_RSA2048;
+                secondary_sign_str = "RSA2048";
+            } else {
+                CMD.sign = SIGN_RSA2048;
+                sign_str = "RSA2048";
+            }
+        }
+        else if (strcmp(argv[i], "--rsa3072enc") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_RSA3072;
+                secondary_sign_str = "RSA3072ENC";
+            } else {
+                CMD.sign = SIGN_RSA3072;
+                sign_str = "RSA3072ENC";
+            }
+            CMD.sign_wenc = 1;
+        }
+        else if (strcmp(argv[i], "--rsa3072") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_RSA3072;
+                secondary_sign_str = "RSA3072";
+            } else {
+                CMD.sign = SIGN_RSA3072;
+                sign_str = "RSA3072";
+            }
+        }
+        else if (strcmp(argv[i], "--rsa4096enc") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_RSA4096;
+                secondary_sign_str = "RSA4096ENC";
+            } else {
+                CMD.sign = SIGN_RSA4096;
+                sign_str = "RSA4096ENC";
+            }
+            CMD.sign_wenc = 1;
+        }
+        else if (strcmp(argv[i], "--rsa4096") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_RSA4096;
+                secondary_sign_str = "RSA4096";
+            } else {
+                CMD.sign = SIGN_RSA4096;
+                sign_str = "RSA4096";
+            }
+        }
+        else if (strcmp(argv[i], "--rsapss2048") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_RSAPSS2048;
+                secondary_sign_str = "RSAPSS2048";
+            } else {
+                CMD.sign = SIGN_RSAPSS2048;
+                sign_str = "RSAPSS2048";
+            }
+        }
+        else if (strcmp(argv[i], "--rsapss3072") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_RSAPSS3072;
+                secondary_sign_str = "RSAPSS3072";
+            } else {
+                CMD.sign = SIGN_RSAPSS3072;
+                sign_str = "RSAPSS3072";
+            }
+        }
+        else if (strcmp(argv[i], "--rsapss4096") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_RSAPSS4096;
+                secondary_sign_str = "RSAPSS4096";
+            } else {
+                CMD.sign = SIGN_RSAPSS4096;
+                sign_str = "RSAPSS4096";
+            }
+        }
+        else if (strcmp(argv[i], "--lms") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_LMS;
+                secondary_sign_str = "LMS";
+            } else {
+                CMD.sign = SIGN_LMS;
+                sign_str = "LMS";
+            }
+        }
+        else if (strcmp(argv[i], "--xmss") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_XMSS;
+                secondary_sign_str = "XMSS";
+            } else {
+                CMD.sign = SIGN_XMSS;
+                sign_str = "XMSS";
+            }
+        }
+        else if (strcmp(argv[i], "--ml_dsa") == 0) {
+            if (CMD.sign != SIGN_AUTO) {
+                CMD.hybrid = 1;
+                CMD.secondary_sign = SIGN_ML_DSA;
+                secondary_sign_str = "ML-DSA";
+            } else {
+                CMD.sign = SIGN_ML_DSA;
+                sign_str = "ML-DSA";
+            }
+        }
+        else if (strcmp(argv[i], "--sha256") == 0) {
+            CMD.hash_algo = HASH_SHA256;
+            hash_str = "SHA256";
+        }
+        else if (strcmp(argv[i], "--sha384") == 0) {
+            CMD.hash_algo = HASH_SHA384;
+            hash_str = "SHA384";
+        }
+        else if (strcmp(argv[i], "--sha3") == 0) {
+            CMD.hash_algo = HASH_SHA3;
+            hash_str = "SHA3";
+        }
+        else if (strcmp(argv[i], "--wolfboot-update") == 0) {
+            CMD.self_update = 1;
+            CMD.partition_id = 0;
+        }
+        else if (strcmp(argv[i], "--header-only") == 0) {
+            CMD.header_only = 1;
+        }
+        else if (strcmp(argv[i], "--id") == 0) {
+            if (argc <= (i + 1)) {
+                fprintf(stderr, "Missing --id argument\n");
+                exit(16);
+            }
+            long id = strtol(argv[++i], NULL, 10);
+            if ((id < 0 || id > 15) || ((id == 0) && (argv[i][0] != '0'))) {
+                fprintf(stderr, "Invalid partition id: %s\n", argv[i]);
+                exit(16);
+            }
+            CMD.partition_id = (uint8_t)id;
+            if (id == 0)
+                CMD.self_update = 1;
+        }
+        else if (strcmp(argv[i], "--sha-only") == 0) {
+            CMD.sha_only = 1;
+        }
+        else if (strcmp(argv[i], "--manual-sign") == 0) {
+            CMD.manual_sign = 1;
+        }
+        else if (strcmp(argv[i], "--encrypt") == 0) {
+            if (argc <= (i + 1)) {
+                fprintf(stderr, "Missing --encrypt key file argument\n");
+                exit(16);
+            }
+            if (CMD.encrypt == ENC_OFF)
+                CMD.encrypt = ENC_CHACHA;
+            CMD.encrypt_key_file = argv[++i];
+        }
+        else if (strcmp(argv[i], "--aes128") == 0) {
+            CMD.encrypt = ENC_AES128;
+        }
+        else if (strcmp(argv[i], "--aes256") == 0) {
+            CMD.encrypt = ENC_AES256;
+        }
+        else if (strcmp(argv[i], "--chacha") == 0) {
+            CMD.encrypt = ENC_CHACHA;
+        }
+        else if (strcmp(argv[i], "--delta") == 0) {
+            if (argc <= (i + 1)) {
+                fprintf(stderr, "Missing --delta base file argument\n");
+                exit(16);
+            }
+            CMD.delta = 1;
+            CMD.delta_base_file = argv[++i];
+        } else if (strcmp(argv[i], "--no-base-sha") == 0) {
+            CMD.no_base_sha = 1;
+        }
+        else if (strcmp(argv[i], "--no-ts") == 0) {
+            CMD.no_ts = 1;
+        }
+        else if (strcmp(argv[i], "--policy") == 0) {
+            if (argc <= (i + 1)) {
+                fprintf(stderr, "Missing --policy file argument\n");
+                exit(16);
+            }
+            CMD.policy_sign = 1;
+            CMD.policy_file = argv[++i];
+        }
+        else if (strcmp(argv[i], "--custom-tlv") == 0) {
+            int p = CMD.custom_tlvs;
+            uint16_t tag, len;
+            if (p >= MAX_CUSTOM_TLVS) {
+                fprintf(stderr, "Too many custom TLVs.\n");
+                exit(16);
+            }
+            if (argc < (i + 4)) {
+                fprintf(stderr, "Invalid custom TLV fields. \n");
+                exit(16);
+            }
+            tag = (uint16_t)arg2num(argv[i + 1], 2);
+            len = (uint16_t)arg2num(argv[i + 2], 2);
+
+            if (tag < 0x0030) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            if ( ((tag & 0xFF00) == 0xFF00) || ((tag & 0xFF) == 0xFF) ) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+
+            if ((len != 1) && (len != 2) && (len != 4) && (len != 8)) {
+                fprintf(stderr, "Invalid custom tag len: %s\n", argv[i + 2]);
+                fprintf(stderr, "Accepted len: 1, 2, 4 or 8\n");
+                exit(16);
+            }
+
+            CMD.custom_tlv[p].tag = tag;
+            CMD.custom_tlv[p].len = len;
+            CMD.custom_tlv[p].val = arg2num(argv[i+3], len);
+            CMD.custom_tlv[p].buffer = NULL;
+            CMD.custom_tlvs++;
+            i += 3;
+        } else if (strcmp(argv[i], "--dts") == 0) {
+            if (argc < (i + 2)) {
+                fprintf(stderr, "Missing device tree file for --dts.\n");
+                exit(16);
+            }
+            /* Hashed in make_header_ex() once the hash algo is known. */
+            CMD.dts_file = argv[i + 1];
+            i += 1;
+        } else if (strcmp(argv[i], "--custom-tlv-buffer") == 0) {
+            int p = CMD.custom_tlvs;
+            uint16_t tag, len;
+            size_t slen;
+            uint32_t j;
+            if (p >= MAX_CUSTOM_TLVS) {
+                fprintf(stderr, "Too many custom TLVs.\n");
+                exit(16);
+            }
+            if (argc < (i + 3)) {
+                fprintf(stderr, "Invalid custom TLV fields. \n");
+                exit(16);
+            }
+            tag = (uint16_t)arg2num(argv[i + 1], 2);
+            slen = strlen(argv[i + 2]);
+            if (tag < 0x0030) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            if ( ((tag & 0xFF00) == 0xFF00) || ((tag & 0xFF) == 0xFF) ) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            if ((slen / 2) > MAX_TLV_LEN) {
+                fprintf(stderr, "custom tlv buffer size too big: "
+                    "%lu bytes (max %u)\n", (unsigned long)(slen / 2),
+                    MAX_TLV_LEN);
+                exit(16);
+            }
+            if ((slen % 2) != 0) {
+                fprintf(stderr, "custom tlv buffer hex string must have an "
+                    "even number of digits: %s\n", argv[i + 2]);
+                exit(16);
+            }
+            len = (uint16_t)(slen / 2);
+            CMD.custom_tlv[p].tag = tag;
+            CMD.custom_tlv[p].len = len;
+            CMD.custom_tlv[p].buffer = malloc(len);
+            if (CMD.custom_tlv[p].buffer == NULL) {
+                fprintf(stderr, "Error malloc for custom tlv buffer %d\n", len);
+                exit(16);
+            }
+            for (j = 0; j < len; j++) {
+                char c[3] = {argv[i + 2][j * 2], argv[i + 2][j * 2 + 1], 0};
+                CMD.custom_tlv[p].buffer[j] = (uint8_t)strtol(c, NULL, 16);
+            }
+            CMD.custom_tlvs++;
+            i += 2;
+        } else if (strcmp(argv[i], "--custom-tlv-string") == 0) {
+            int p = CMD.custom_tlvs;
+            uint16_t tag, len;
+            size_t slen;
+            uint32_t j;
+            if (p >= MAX_CUSTOM_TLVS) {
+                fprintf(stderr, "Too many custom TLVs.\n");
+                exit(16);
+            }
+            if (argc < (i + 3)) {
+                fprintf(stderr, "Invalid custom TLV fields. \n");
+                exit(16);
+            }
+            tag = (uint16_t)arg2num(argv[i + 1], 2);
+            slen = strlen(argv[i + 2]);
+            if (tag < 0x0030) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            if ( ((tag & 0xFF00) == 0xFF00) || ((tag & 0xFF) == 0xFF) ) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            if (slen > MAX_TLV_LEN) {
+                fprintf(stderr, "custom tlv string size too big: "
+                    "%lu bytes (max %u)\n", (unsigned long)slen, MAX_TLV_LEN);
+                exit(16);
+            }
+            len = (uint16_t)slen;
+            CMD.custom_tlv[p].tag = tag;
+            CMD.custom_tlv[p].len = len;
+            CMD.custom_tlv[p].buffer = malloc(len);
+            if (CMD.custom_tlv[p].buffer == NULL) {
+                fprintf(stderr, "Error malloc for custom tlv buffer %d\n", len);
+                exit(16);
+            }
+            for (j = 0; j < len; j++) {
+                CMD.custom_tlv[p].buffer[j] = (uint8_t)argv[i+2][j];
+            }
+            CMD.custom_tlvs++;
+            i += 2;
+        } else if (strcmp(argv[i], "--custom-tlv-file") == 0) {
+            int p = CMD.custom_tlvs;
+            uint16_t tag;
+            FILE *f;
+            long fsz;
+            size_t rd;
+            if (p >= MAX_CUSTOM_TLVS) {
+                fprintf(stderr, "Too many custom TLVs.\n");
+                exit(16);
+            }
+            if (argc < (i + 3)) {
+                fprintf(stderr, "Invalid custom TLV fields. \n");
+                exit(16);
+            }
+            tag = (uint16_t)arg2num(argv[i + 1], 2);
+            if (tag < 0x0030) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            if ( ((tag & 0xFF00) == 0xFF00) || ((tag & 0xFF) == 0xFF) ) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            f = fopen(argv[i + 2], "rb");
+            if (f == NULL) {
+                fprintf(stderr, "Cannot open custom tlv file %s: %s\n",
+                    argv[i + 2], strerror(errno));
+                exit(16);
+            }
+            fseek(f, 0, SEEK_END);
+            fsz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (fsz <= 0) {
+                fprintf(stderr, "custom tlv file is empty or unreadable: %s\n",
+                    argv[i + 2]);
+                fclose(f);
+                exit(16);
+            }
+            if (fsz > (long)MAX_TLV_LEN) {
+                fprintf(stderr, "custom tlv file too big: %ld bytes "
+                    "(max %u): %s\n", fsz, MAX_TLV_LEN, argv[i + 2]);
+                fclose(f);
+                exit(16);
+            }
+            CMD.custom_tlv[p].tag = tag;
+            CMD.custom_tlv[p].len = (uint16_t)fsz;
+            CMD.custom_tlv[p].buffer = malloc((size_t)fsz);
+            if (CMD.custom_tlv[p].buffer == NULL) {
+                fprintf(stderr, "Error malloc for custom tlv buffer %ld\n",
+                    fsz);
+                fclose(f);
+                exit(16);
+            }
+            rd = fread(CMD.custom_tlv[p].buffer, 1, (size_t)fsz, f);
+            fclose(f);
+            if (rd != (size_t)fsz) {
+                fprintf(stderr, "Error reading custom tlv file %s\n",
+                    argv[i + 2]);
+                exit(16);
+            }
+            CMD.custom_tlvs++;
+            i += 2;
+        } else if (strcmp(argv[i], "--custom-tlv-pubkey-der") == 0) {
+            int p = CMD.custom_tlvs;
+            uint16_t tag;
+            if (p >= MAX_CUSTOM_TLVS) {
+                fprintf(stderr, "Too many custom TLVs.\n");
+                exit(16);
+            }
+            if (argc < (i + 3)) {
+                fprintf(stderr, "Invalid custom TLV fields. \n");
+                exit(16);
+            }
+            tag = (uint16_t)arg2num(argv[i + 1], 2);
+            if (tag < 0x0030) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            if ( ((tag & 0xFF00) == 0xFF00) || ((tag & 0xFF) == 0xFF) ) {
+                fprintf(stderr, "Invalid custom tag: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            if (extract_pubkey_from_der(argv[i + 2],
+                    &CMD.custom_tlv[p].buffer, &CMD.custom_tlv[p].len) != 0) {
+                exit(16);
+            }
+            CMD.custom_tlv[p].tag = tag;
+            CMD.custom_tlvs++;
+            i += 2;
+        }
+        else if (strcmp(argv[i], "--cmdline") == 0) {
+            /* Shorthand for --custom-tlv-string HDR_CMDLINE "<args>": stores the
+             * OS command line as a signature-covered TLV in the manifest. */
+            int p = CMD.custom_tlvs;
+            uint16_t len;
+            uint32_t j;
+            if (p >= MAX_CUSTOM_TLVS) {
+                fprintf(stderr, "Too many custom TLVs.\n");
+                exit(16);
+            }
+            if (argc < (i + 2)) {
+                fprintf(stderr, "Missing --cmdline argument.\n");
+                exit(16);
+            }
+            len = (uint16_t)strlen(argv[i + 1]);
+            if (len == 0 || len > 255) {
+                fprintf(stderr, "cmdline must be 1..255 bytes: %s\n", argv[i + 1]);
+                exit(16);
+            }
+            CMD.custom_tlv[p].tag = HDR_CMDLINE;
+            CMD.custom_tlv[p].len = len;
+            CMD.custom_tlv[p].buffer = malloc(len);
+            if (CMD.custom_tlv[p].buffer == NULL) {
+                fprintf(stderr, "Error malloc for cmdline tlv buffer %d\n", len);
+                exit(16);
+            }
+            for (j = 0; j < len; j++) {
+                CMD.custom_tlv[p].buffer[j] = (uint8_t)argv[i + 1][j];
+            }
+            CMD.custom_tlvs++;
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--cert-chain") == 0) {
+            if (argc <= (i + 1)) {
+                fprintf(stderr, "Missing certificate chain file argument\n");
+                exit(16);
+            }
+            CMD.cert_chain_file = argv[++i];
+        }
+        else {
+            i--;
+            break;
+        }
+    }
+    if ((CMD.sign == CMD.secondary_sign) && (CMD.hybrid)) {
+        printf("Warning: Duplicate signature algorithm detected. Fix your command line!\n");
+        CMD.hybrid = 0;
+        CMD.secondary_key_file = NULL;
+        CMD.secondary_signature_sz = 0;
+    }
+
+    /* Validate the positional argument count for the selected mode: image +
+     * version, plus key (and secondary key when hybrid) when signing, plus
+     * the precomputed signature file with --manual-sign. */
+    pos_args = argc - (i + 1);
+    need = 2; /* image file + version */
+    if (CMD.sign != NO_SIGN) {
+        need += 1; /* key file */
+        if (CMD.hybrid)
+            need += 1; /* secondary key file */
+        if (CMD.manual_sign)
+            need += 1; /* precomputed signature file */
+    }
+    if (pos_args < need) {
+        fprintf(stderr, "Missing positional arguments: need %d, got %d "
+            "(image key version)\n", need, pos_args);
+        exit(1);
+    }
+
+
+    if (CMD.sign != NO_SIGN) {
+        if (CMD.hybrid) {
+            printf("Parsing arguments in hybrid mode\n");
+            CMD.image_file = argv[i+1];
+            CMD.key_file = argv[i+2];
+            CMD.secondary_key_file = argv[i+3];
+            CMD.fw_version = argv[i+4];
+            if (CMD.manual_sign) {
+                CMD.signature_file = argv[i+5];
+            }
+            printf("Secondary private key: %s\n", CMD.secondary_key_file);
+            printf("Secondary cipher: %s\n", secondary_sign_str);
+            printf("Version: %s\n", CMD.fw_version);
+        } else {
+            CMD.image_file = argv[i+1];
+            CMD.key_file = argv[i+2];
+            CMD.fw_version = argv[i+3];
+            if (CMD.manual_sign) {
+                CMD.signature_file = argv[i+4];
+            }
+        }
+    } else {
+        CMD.image_file = argv[i+1];
+        CMD.key_file = NULL;
+        CMD.fw_version = argv[i+2];
+    }
+
+    /* --dts can grow the header after patch_inv_off is computed, so the delta
+     * inverse offset would be stale. Reject the combination. */
+    if (CMD.dts_file != NULL && CMD.delta) {
+        fprintf(stderr, "Error: --dts cannot be combined with --delta\n");
+        exit(16);
+    }
+
+    memset(buf, 0, sizeof(buf));
+    strncpy((char*)buf, CMD.image_file, sizeof(buf)-1);
+    tmpstr = strrchr((char*)buf, '.');
+    if (tmpstr) {
+        *tmpstr = '\0'; /* null terminate at last "." */
+    }
+    {
+        const char* artifact =
+            CMD.header_only ? "header" : (CMD.sha_only ? "digest" : "signed");
+        snprintf(CMD.output_image_file, sizeof(CMD.output_image_file) - 1,
+                 "%s_v%s_%s.bin", (char*)buf, CMD.fw_version, artifact);
+    }
+
+    snprintf(CMD.output_encrypted_image_file,
+            sizeof(CMD.output_encrypted_image_file),
+            "%s_v%s_signed_and_encrypted.bin",
+            (char*)buf, CMD.fw_version);
+
+    printf("Update type:          %s\n",
+            CMD.self_update ? "wolfBoot" : "Firmware");
+    switch(CMD.encrypt) {
+        case ENC_OFF:
+                break;
+        case ENC_CHACHA:
+                printf("Encryption Algorithm: ChaCha20\n");
+                break;
+        case ENC_AES128:
+                printf("Encryption Algorithm: AES128-CTR\n");
+                break;
+        case ENC_AES256:
+                printf("Encryption Algorithm: AES256-CTR\n");
+                break;
+    }
+    printf("Input image:          %s\n", CMD.image_file);
+    printf("Selected cipher:      %s\n", sign_str);
+    printf("Selected hash  :      %s\n", hash_str);
+    if (CMD.sign != NO_SIGN) {
+        printf("Private key:           %s\n", CMD.key_file);
+    }
+    if (CMD.hybrid) {
+        printf("Secondary cipher:     %s\n", secondary_sign_str);
+        printf("Secondary private key: %s\n", CMD.secondary_key_file);
+    }
+    if (CMD.delta) {
+        printf("Delta Base file:      %s\n", CMD.delta_base_file);
+        snprintf(CMD.output_diff_file, sizeof(CMD.output_diff_file),
+                "%s_v%s_signed_diff.bin",
+                (char*)buf, CMD.fw_version);
+        snprintf(CMD.output_encrypted_image_file,
+                sizeof(CMD.output_encrypted_image_file),
+                "%s_v%s_signed_diff_encrypted.bin",
+                (char*)buf, CMD.fw_version);
+    }
+    printf("Output %6s:        %s\n",
+           CMD.header_only ? "header" : (CMD.sha_only ? "digest" : "image"),
+           CMD.output_image_file);
+    if (CMD.encrypt && !CMD.header_only) {
+        printf("Encrypted output:     %s\n", CMD.output_encrypted_image_file);
+    }
+    printf("Target partition id : %hu ", CMD.partition_id);
+    if (CMD.partition_id == HDR_IMG_TYPE_WOLFBOOT)
+        printf("(bootloader)");
+    printf("\n");
+
+    if (CMD.custom_tlvs > 0) {
+        uint32_t i, j;
+        printf("Custom TLVS: %u\n", CMD.custom_tlvs);
+        for (i = 0; i < CMD.custom_tlvs; i++) {
+            printf("TLV %u\n", i);
+            printf("----\n");
+            if (CMD.custom_tlv[i].buffer) {
+                uint16_t print_len = CMD.custom_tlv[i].len;
+                if (print_len > 256) {
+                    print_len = 256;
+                }
+                printf("Tag: %04X Len: %hu Val: ", CMD.custom_tlv[i].tag,
+                        CMD.custom_tlv[i].len);
+                for (j = 0; j < print_len; j++) {
+                    printf("%02X", CMD.custom_tlv[i].buffer[j]);
+                }
+                if (print_len < CMD.custom_tlv[i].len) {
+                    printf("... (truncated, %hu bytes total)",
+                        CMD.custom_tlv[i].len);
+                }
+                printf("\n");
+
+            } else {
+                printf("Tag: %04X Len: %hu Val: %" PRIu64 "\n", CMD.custom_tlv[i].tag,
+                        CMD.custom_tlv[i].len, CMD.custom_tlv[i].val);
+            }
+            printf("-----\n");
+        }
+    }
+
+    set_signature_sizes(0);
+    if (CMD.hybrid) {
+        set_signature_sizes(1);
+    }
+
+    if (((CMD.sign != NO_SIGN) && (CMD.signature_sz == 0)) ||
+            CMD.header_sz == 0) {
+        printf("Invalid hash or signature type! %d, %d, %d\n", CMD.sign,
+               CMD.signature_sz, CMD.header_sz);
+        exit(2);
+    }
+
+    if (CMD.sign == NO_SIGN) {
+        printf ("*** WARNING: cipher 'none' selected.\n"
+                "*** Image will not be authenticated!\n"
+                "*** SECURE BOOT DISABLED.\n");
+    } else {
+        kbuf = load_key(&key_buffer, &key_buffer_sz, &pubkey, &pubkey_sz, 0);
+        if (!kbuf) {
+            ret = 1;
+            goto cleanup;
+        }
+    } /* CMD.sign != NO_SIGN */
+
+    if (CMD.hybrid) {
+        uint8_t *kbuf2 = NULL;
+        uint8_t *pubkey2 = NULL;
+        uint32_t pubkey_sz2 = 0;
+        DEBUG_PRINT("Loading secondary key\n");
+        kbuf2 = load_key(&key_buffer2, &key_buffer_sz2, &pubkey2, &pubkey_sz2, 1);
+        if (!kbuf2) {
+            /* Fall through to the tail cleanup: the primary raw key buffer is
+             * still live and the primary key object is initialized, and
+             * exiting here would scrub neither. */
+            ret = 1;
+            goto cleanup;
+        }
+        printf("Creating hybrid signature\n");
+        ret = make_hybrid_header(pubkey, pubkey_sz, CMD.image_file,
+                CMD.output_image_file, pubkey2, pubkey_sz2);
+        DEBUG_PRINT("Signature size: %u\n", CMD.signature_sz);
+        DEBUG_PRINT("Secondary signature size: %u\n", CMD.secondary_signature_sz);
+        DEBUG_PRINT("Header size: %u\n", CMD.header_sz);
+        if (kbuf2)
+            zero_and_free(kbuf2, key_buffer_sz2);
+        if (pubkey2)
+            free(pubkey2);
+    } else {
+        ret = make_header(pubkey, pubkey_sz, CMD.image_file,
+                CMD.output_image_file);
+    }
+
+    /* Skip the delta step and propagate the failure to the caller if the
+     * signed image could not be created. */
+    if ((ret == 0) && CMD.delta) {
+        if (CMD.encrypt)
+            ret = base_diff(CMD.delta_base_file, pubkey, pubkey_sz, 64);
+        else
+            ret = base_diff(CMD.delta_base_file, pubkey, pubkey_sz, 16);
+    }
+
+cleanup:
+    /* Add pubkey cleanup */
+    if (pubkey)
+        free(pubkey);
+
+    if (kbuf)
+        zero_and_free(kbuf, key_buffer_sz);
+    free_key(CMD.sign, 0);
+    if (CMD.hybrid) {
+        free_key(CMD.secondary_sign, 1);
+    }
+    /* Defence in depth: scrub the decoded key objects regardless of the
+     * algorithm dispatch above, so no key residue survives. */
+    wc_ForceZero(&key, sizeof(key));
+    if (CMD.hybrid) {
+        wc_ForceZero(&key2, sizeof(key2));
+    }
+    return ret;
+}

@@ -1,0 +1,102 @@
+name: Wolfboot Reusable Build Workflow
+
+on:
+
+  workflow_call:
+    inputs:
+      arch:
+        required: true
+        type: string
+      config-file:
+        required: true
+        type: string
+      make-args:
+        required: false
+        type: string
+      prep-run:
+        required: false
+        type: string
+      fips:
+        # Download the FIPS-ready wolfSSL tree into ../ before building.
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/wolfssl/wolfboot-ci-arm:v1.3
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: make clean
+        run: |
+          make distclean
+
+      - name: Select config
+        run: |
+          cp ${{inputs.config-file}} .config
+
+      - name: Build tools
+        run: |
+          make -C tools/keytools && make -C tools/bin-assemble
+
+      - name: Pre-build setup
+        if: inputs.prep-run != ''
+        run: ${{inputs.prep-run}}
+      - name: Download FIPS-ready wolfSSL
+        if: ${{ inputs.fips }}
+        env:
+          WOLFSSL_FIPS_READY_VER: "5.9.2-gplv3-fips-ready"
+          # Pin the archive SHA-256 in the repo Actions variable
+          # WOLFSSL_FIPS_READY_SHA256 (Settings > Secrets and variables >
+          # Actions > Variables). When set, a mismatch fails the job; when unset,
+          # the job prints the computed hash to pin and warns instead of silently
+          # trusting a mutable download that becomes the FIPS boundary.
+          WOLFSSL_FIPS_READY_SHA256: ${{ vars.WOLFSSL_FIPS_READY_SHA256 }}
+        run: |
+          set -euxo pipefail
+          zip=/tmp/wolfssl-fips-ready.zip
+          curl -fsSL --retry 3 --retry-delay 5 -o "$zip" \
+            "https://www.wolfssl.com/wolfssl-${WOLFSSL_FIPS_READY_VER}.zip"
+          got="$(sha256sum "$zip" | awk '{print $1}')"
+          echo "wolfssl-${WOLFSSL_FIPS_READY_VER}.zip sha256=$got"
+          if [ -n "${WOLFSSL_FIPS_READY_SHA256:-}" ]; then
+            echo "${WOLFSSL_FIPS_READY_SHA256}  $zip" | sha256sum -c -
+          else
+            echo "::warning::WOLFSSL_FIPS_READY_SHA256 not set; archive not pinned. Set the repo Actions variable to $got to enforce."
+          fi
+          # Runs inside the CI container (no sudo/apt); unpack with python3,
+          # which is already a build dependency.
+          python3 -m zipfile -e "$zip" ..
+          test -f "../wolfssl-${WOLFSSL_FIPS_READY_VER}/wolfcrypt/src/fips.c"
+
+      - name: Build wolfboot
+        run: |
+          make ${{inputs.make-args}}
+
+      - name: Rebuild wolfboot with Clang
+        if: |
+          inputs.config-file == './config/examples/stm32h7.config' ||
+          inputs.config-file == './config/examples/stm32h7-octospi.config' ||
+          inputs.config-file == './config/examples/stm32h7s.config' ||
+          inputs.config-file == './config/examples/stm32u3.config' ||
+          inputs.config-file == './config/examples/stm32u5.config' ||
+          inputs.config-file == './config/examples/stm32u5-wolfcrypt-tz.config' ||
+          inputs.config-file == './config/examples/stm32u5-nonsecure-dualbank.config' ||
+          inputs.config-file == './config/examples/stm32n6.config' ||
+          inputs.config-file == './config/examples/stm32n6-tz.config'
+        run: |
+          make distclean
+          cp ${{inputs.config-file}} .config
+          make -C tools/keytools && make -C tools/bin-assemble
+          make USE_CLANG=1 USE_GCC=0 ${{inputs.make-args}}
