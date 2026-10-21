@@ -24,11 +24,71 @@
 #include "wolfboot/wolfboot.h"
 
 #ifdef TARGET_stm32f4
-/* Tutorial: no Discovery GPIO outputs on an unverified Explorer board.
- * Use GDB time_elapsed as liveness indication. Add PF9/PF10 only after
- * checking the exact board schematic and active-low wiring. */
-void led_pwm_setup(void) {}
-void boot_led_on(void) {}
+/* ALIENTEK Explorer (STM32F407ZGT6): DS0=PF9 (red), DS1=PF10 (green),
+ * both active-low (drive the pin low to light). Configured as plain GPIO
+ * outputs so the blink is visible right after wolfBoot hands control to
+ * the APP, independent of the TIM4_CH4/PD15 PWM path used by pwm_init()
+ * (PD15 is not wired to a LED on this board). */
+#define AHB1_CLOCK_ER         (*(volatile uint32_t *)(0x40023830)) /* RCC_AHB1ENR */
+#define GPIOF_AHB1_CLOCK_ER   (1u << 5)                           /* GPIOFEN */
+
+#define GPIOF_BASE          (0x40021400)
+#define GPIOF_MODE          (*(volatile uint32_t *)(GPIOF_BASE + 0x00))
+#define GPIOF_OTYPE         (*(volatile uint32_t *)(GPIOF_BASE + 0x04))
+#define GPIOF_PUPD          (*(volatile uint32_t *)(GPIOF_BASE + 0x0c))
+#define GPIOF_ODR           (*(volatile uint32_t *)(GPIOF_BASE + 0x14))
+#define GPIOF_BSRR          (*(volatile uint32_t *)(GPIOF_BASE + 0x18))
+
+#define LED0_PIN            (9)  /* PF9  - DS0 (red)   */
+#define LED1_PIN            (10) /* PF10 - DS1 (green) */
+
+static void led_pins_init(void)
+{
+    uint32_t reg;
+    AHB1_CLOCK_ER |= GPIOF_AHB1_CLOCK_ER;
+    (void)AHB1_CLOCK_ER; /* read-back so GPIOF clock is live before MODER */
+    /* PF9/PF10 -> general purpose output (01), push-pull, no pull */
+    reg = GPIOF_MODE & ~((0x03u << (LED0_PIN * 2)) | (0x03u << (LED1_PIN * 2)));
+    GPIOF_MODE = reg | (1u << (LED0_PIN * 2)) | (1u << (LED1_PIN * 2));
+    GPIOF_OTYPE &= ~((1u << LED0_PIN) | (1u << LED1_PIN));
+    reg = GPIOF_PUPD & ~((0x03u << (LED0_PIN * 2)) | (0x03u << (LED1_PIN * 2)));
+    GPIOF_PUPD = reg;
+}
+
+void led_pwm_setup(void)
+{
+    led_pins_init();
+    /* active-low: clear PF9/PF10 to light DS0/DS1 */
+    GPIOF_BSRR = (1u << (LED1_PIN + 16)) | (1u << (LED0_PIN + 16));
+}
+
+void boot_led_on(void)
+{
+    led_pins_init();
+    GPIOF_BSRR = (1u << (LED1_PIN + 16)) | (1u << (LED0_PIN + 16));
+}
+
+void boot_led_off(void)
+{
+    GPIOF_BSRR = (1u << LED1_PIN) | (1u << LED0_PIN);
+}
+
+void led_on(void)
+{
+    GPIOF_BSRR = (1u << (LED1_PIN + 16)) | (1u << (LED0_PIN + 16));
+}
+
+void led_off(void)
+{
+    GPIOF_BSRR = (1u << LED1_PIN) | (1u << LED0_PIN);
+}
+
+void led_toggle(void)
+{
+    /* Toggle both DS0/DS1 together. ODR read/modify/write is safe here
+     * because main() never touches GPIOF_ODR after setup. */
+    GPIOF_ODR ^= (1u << LED0_PIN) | (1u << LED1_PIN);
+}
 #endif /* TARGET_stm32f4 */
 
 #ifdef TARGET_stm32l0

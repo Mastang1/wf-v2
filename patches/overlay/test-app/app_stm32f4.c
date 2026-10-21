@@ -247,22 +247,28 @@ void main(void) {
     flash_set_waitstates();
     clock_config();
     led_pwm_setup();
-    pwm_init(CLOCK_SPEED / 2U, 0); /* APB1 timers=84MHz */
-
-    /* Dim the led by altering the PWM duty-cicle
-     * in isr_tim2 (timer.c)
-     *
-     * Every 50ms, the duty cycle of the PWM connected
-     * to the blue led increases/decreases making a pulse
-     * effect.
+    /*
+     * Visible liveness on the Explorer board's LEDs (DS0=PF9, DS1=PF10,
+     * active-low). The upstream TIM2-IRQ heartbeat is not usable here:
+     * the test-app vector table for this target only carries the 16
+     * system exceptions, so enabling TIM2 (timer_init + nvic_irq_enable)
+     * would vector into an invalid slot and HardFault. Blink via a plain
+     * GPIO toggle + busy wait instead, then leave the LEDs steadily lit.
      */
-    timer_init(CLOCK_SPEED / 2U, 1, 50);
     uart_setup(115200, 8, 'N', 1);
     memset(page, 0xFF, PAGESIZE);
     asm volatile ("cpsie i");
 
-    while(time_elapsed == 0)
-        WFI();
+    {
+        int k;
+        volatile uint32_t d;
+        for (k = 0; k < 6; k++) {
+            led_toggle();
+            for (d = 0; d < 8000000u; d++)
+                __asm volatile ("nop");
+        }
+        led_on(); /* keep DS0/DS1 steadily lit while waiting for updates */
+    }
 
 
 

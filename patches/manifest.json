@@ -9,11 +9,11 @@
   },
   "test-app/app_stm32f4.c": {
     "before": "cbef9cd24f70605e077004d484e8549c10c4a5f93347dd5d4c0f9e87ddbefc78",
-    "after": "72dca159935209f96d53d9d42568a9479678029d666d643b9320a9592d8141b5"
+    "after": "acb6cb90fe37d7bc27cc60a847d2d995de88699d558c1e439deec741c7202a69"
   },
   "test-app/led.c": {
     "before": "0b642094badda28e7acb3b3ff07e2003c5be22109c04689fc9d0cce14a24440f",
-    "after": "85c79e997f817ad281d1cedc25fe77bd001cde094969d51a36f768fd4e1e6b7e"
+    "after": "d4eac8351ff86eed23f801d002ddc8293aa21b2b21a6b15bce0ee777bd2c0918"
   },
   "test-app/timer.c": {
     "before": "88e9fcc46be0a0daa326c098b5f707d5dfa4cbe5abcd734f1db3fbaf24701cd7",
